@@ -272,6 +272,19 @@ func (n *Node) advanceCommit() {
 	}
 }
 
+// LogEntries returns the log entries in the half-open range [lo, hi).  It is
+// a read-only accessor over the node's log, useful to tests and to Phase 6
+// inspection; it returns nil if the range cannot be served.
+func (n *Node) LogEntries(lo, hi uint64) []LogEntry {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	es, err := n.log.slice(lo, hi)
+	if err != nil {
+		return nil
+	}
+	return es
+}
+
 // Ready returns the committed-but-not-yet-applied log entries and advances the
 // last-applied index past them.  Phase 6 feeds these into the state machine.
 func (n *Node) Ready() []LogEntry {
