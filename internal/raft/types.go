@@ -73,7 +73,6 @@ func (t MsgType) String() string {
 
 // Snapshot is a point-in-time image of the state machine used when a
 // follower is too far behind to be caught up via log entries alone.
-// The Conf/membership field will be added in Phase 8.
 type Snapshot struct {
 	// Index is the log index of the last entry covered by this snapshot.
 	Index uint64
@@ -81,6 +80,10 @@ type Snapshot struct {
 	Term uint64
 	// Data is the opaque serialised state-machine image.
 	Data []byte
+	// Conf is the cluster-membership configuration in effect at the snapshot
+	// point.  A node installing the snapshot restores its ClusterConfig from
+	// this field; a restarted node seeds membership replay from it.
+	Conf ClusterConfig
 }
 
 // Message is the unified Raft RPC envelope.  All inter-node communication

@@ -201,10 +201,15 @@ func (x *LogEntry) GetData() []byte {
 
 // Snapshot holds a point-in-time snapshot of the state machine.
 type Snapshot struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Index         uint64                 `protobuf:"varint,1,opt,name=index,proto3" json:"index,omitempty"`
-	Term          uint64                 `protobuf:"varint,2,opt,name=term,proto3" json:"term,omitempty"`
-	Data          []byte                 `protobuf:"bytes,3,opt,name=data,proto3" json:"data,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Index uint64                 `protobuf:"varint,1,opt,name=index,proto3" json:"index,omitempty"`
+	Term  uint64                 `protobuf:"varint,2,opt,name=term,proto3" json:"term,omitempty"`
+	Data  []byte                 `protobuf:"bytes,3,opt,name=data,proto3" json:"data,omitempty"`
+	// Cluster-membership configuration captured at the snapshot point, so a
+	// follower that installs the snapshot also recovers cluster membership.
+	Voters        []string `protobuf:"bytes,4,rep,name=voters,proto3" json:"voters,omitempty"`
+	OldVoters     []string `protobuf:"bytes,5,rep,name=old_voters,json=oldVoters,proto3" json:"old_voters,omitempty"`
+	Joint         bool     `protobuf:"varint,6,opt,name=joint,proto3" json:"joint,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -258,6 +263,27 @@ func (x *Snapshot) GetData() []byte {
 		return x.Data
 	}
 	return nil
+}
+
+func (x *Snapshot) GetVoters() []string {
+	if x != nil {
+		return x.Voters
+	}
+	return nil
+}
+
+func (x *Snapshot) GetOldVoters() []string {
+	if x != nil {
+		return x.OldVoters
+	}
+	return nil
+}
+
+func (x *Snapshot) GetJoint() bool {
+	if x != nil {
+		return x.Joint
+	}
+	return false
 }
 
 // Message is the wire representation of a raft.Message, used for internal
@@ -1178,11 +1204,15 @@ const file_api_distkv_proto_rawDesc = "" +
 	"\x04term\x18\x01 \x01(\x04R\x04term\x12\x14\n" +
 	"\x05index\x18\x02 \x01(\x04R\x05index\x12%\n" +
 	"\x04type\x18\x03 \x01(\x0e2\x11.distkv.EntryTypeR\x04type\x12\x12\n" +
-	"\x04data\x18\x04 \x01(\fR\x04data\"H\n" +
+	"\x04data\x18\x04 \x01(\fR\x04data\"\x95\x01\n" +
 	"\bSnapshot\x12\x14\n" +
 	"\x05index\x18\x01 \x01(\x04R\x05index\x12\x12\n" +
 	"\x04term\x18\x02 \x01(\x04R\x04term\x12\x12\n" +
-	"\x04data\x18\x03 \x01(\fR\x04data\"\x9b\x04\n" +
+	"\x04data\x18\x03 \x01(\fR\x04data\x12\x16\n" +
+	"\x06voters\x18\x04 \x03(\tR\x06voters\x12\x1d\n" +
+	"\n" +
+	"old_voters\x18\x05 \x03(\tR\toldVoters\x12\x14\n" +
+	"\x05joint\x18\x06 \x01(\bR\x05joint\"\x9b\x04\n" +
 	"\aMessage\x12#\n" +
 	"\x04type\x18\x01 \x01(\x0e2\x0f.distkv.MsgTypeR\x04type\x12\x12\n" +
 	"\x04from\x18\x02 \x01(\tR\x04from\x12\x0e\n" +

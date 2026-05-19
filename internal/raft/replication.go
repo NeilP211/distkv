@@ -5,6 +5,11 @@ import "errors"
 // ErrNotLeader is returned by Propose when the node is not the current leader.
 var ErrNotLeader = errors.New("raft: not the leader")
 
+// ErrConfChangeInProgress is returned by ProposeConfChange when a membership
+// change is already underway — the node is still in a joint configuration, and
+// Raft permits only one membership change in flight at a time.
+var ErrConfChangeInProgress = errors.New("raft: configuration change already in progress")
+
 // Propose appends an application command to the leader's log and returns the
 // index assigned to it.  It fails with ErrNotLeader on any non-leader node.
 // Replication to followers happens on the next heartbeat Tick.
@@ -29,14 +34,136 @@ func (n *Node) Propose(data []byte) (uint64, error) {
 	return idx, nil
 }
 
+// ProposeConfChange begins a cluster-membership change by appending a joint
+// configuration entry (an EntryConfChange carrying cc with Leave=false) to the
+// leader's log.  It is leader-only (ErrNotLeader otherwise) and rejects a new
+// change while one is still in flight — i.e. while the node's configuration is
+// still joint — with ErrConfChangeInProgress.
+//
+// The node adopts the joint configuration immediately, on APPEND (§6), so the
+// joint-consensus rules take effect before the entry commits.  The leader
+// completes the change automatically: completeMembershipChange appends the
+// final (joint-leaving) entry once the joint entry commits.
+func (n *Node) ProposeConfChange(cc ConfChange) (uint64, error) {
+	n.mu.Lock()
+	if n.role != Leader {
+		n.mu.Unlock()
+		return 0, ErrNotLeader
+	}
+	if n.clusterConfig.Joint {
+		n.mu.Unlock()
+		return 0, ErrConfChangeInProgress
+	}
+	cc.Leave = false
+	entry := LogEntry{Term: n.currentTerm, Type: EntryConfChange, Data: cc.encode()}
+	n.log.append([]LogEntry{entry})
+	idx := n.log.lastIndex()
+	// Adopt the membership change on append, then refresh per-peer progress
+	// so a newly added member is replicated to immediately.
+	n.applyConfEntry(LogEntry{Type: EntryConfChange, Data: cc.encode(), Index: idx, Term: n.currentTerm})
+	n.matchIndex[n.id] = idx
+	n.advanceCommit()
+	out := n.buildAppendEntries()
+	n.mu.Unlock()
+
+	n.dispatch(out)
+	return idx, nil
+}
+
+// completeMembershipChange drives the second half of a joint-consensus
+// membership change.  When the leader observes that the joint-config entry has
+// committed and the node is still leader and still joint, it appends the final
+// (joint-leaving) EntryConfChange.  When the final configuration has committed
+// and the leader is no longer a voter in it, the leader steps down — it must
+// not keep leading a cluster it is not part of.  Caller must hold the node
+// mutex; safe to call on a non-leader (it is then a no-op).
+func (n *Node) completeMembershipChange() {
+	if n.role != Leader {
+		return
+	}
+
+	// Leader removed itself: once the final config commits, step down.
+	if !n.clusterConfig.Joint {
+		if !containsID(n.clusterConfig.Voters, n.id) && n.confEntryCommitted() {
+			n.becomeFollower(n.currentTerm, "")
+		}
+		return
+	}
+
+	// Still joint: append the leaving entry once the joint entry has committed.
+	jointIdx, jointCC, ok := n.lastConfEntry()
+	if !ok || jointCC.Leave {
+		return
+	}
+	if n.commitIndex < jointIdx {
+		return
+	}
+	leave := ConfChange{Type: jointCC.Type, Node: jointCC.Node, Leave: true}
+	entry := LogEntry{Term: n.currentTerm, Type: EntryConfChange, Data: leave.encode()}
+	n.log.append([]LogEntry{entry})
+	idx := n.log.lastIndex()
+	n.applyConfEntry(LogEntry{Type: EntryConfChange, Data: leave.encode(), Index: idx, Term: n.currentTerm})
+	n.matchIndex[n.id] = idx
+	// Recompute commit (the leave entry may be immediately committable in a
+	// small cluster) — but guard against unbounded recursion: advanceCommit
+	// calls completeMembershipChange again, which will now find the config
+	// already simple and only ever step the leader down.
+	n.advanceCommit()
+}
+
+// lastConfEntry returns the highest-indexed EntryConfChange in the log that the
+// node can still serve, its decoded ConfChange, and whether one was found.
+// Caller must hold the node mutex.
+func (n *Node) lastConfEntry() (uint64, ConfChange, bool) {
+	first, err := n.storage.FirstIndex()
+	if err != nil {
+		return 0, ConfChange{}, false
+	}
+	for i := n.log.lastIndex(); i >= first; i-- {
+		es, err := n.log.slice(i, i+1)
+		if err != nil || len(es) != 1 {
+			break
+		}
+		if es[0].Type == EntryConfChange {
+			cc, err := decodeConfChange(es[0].Data)
+			if err != nil {
+				return 0, ConfChange{}, false
+			}
+			return i, cc, true
+		}
+		if i == 0 {
+			break
+		}
+	}
+	return 0, ConfChange{}, false
+}
+
+// confEntryCommitted reports whether the most recent EntryConfChange in the log
+// has been committed.  Caller must hold the node mutex.
+func (n *Node) confEntryCommitted() bool {
+	idx, _, ok := n.lastConfEntry()
+	return ok && n.commitIndex >= idx
+}
+
+// containsID reports whether ids contains id.
+func containsID(ids []NodeID, id NodeID) bool {
+	for _, x := range ids {
+		if x == id {
+			return true
+		}
+	}
+	return false
+}
+
 // buildAppendEntries collects a replication message for every peer based on
 // its nextIndex.  For a peer whose nextIndex still lies within the leader's
 // log it is a MsgAppendEntries; for a peer that has fallen behind the leader's
 // compacted log boundary it is a MsgInstallSnapshot.  Caller must hold the
 // node mutex; the node must be the leader.
 func (n *Node) buildAppendEntries() []outMsg {
-	out := make([]outMsg, 0, len(n.peers)-1)
-	for _, p := range n.peers {
+	members := n.clusterConfig.allMembers()
+	out := make([]outMsg, 0, len(members))
+	for _, p := range members {
 		if p == n.id {
 			continue
 		}
@@ -156,7 +283,27 @@ func (n *Node) handleAppendEntries(msg Message) Message {
 		default:
 			// Append from the first conflicting entry onward.
 			start := conflict - msg.Entries[0].Index
-			n.log.append(msg.Entries[start:])
+			appended := msg.Entries[start:]
+			// A conflict means we truncated a divergent suffix.  Any
+			// EntryConfChange in that suffix must be undone, so re-derive
+			// the configuration by replay from durable state, then re-apply
+			// the membership effect of the entries we just appended.
+			truncated := conflict <= n.log.lastIndex()
+			n.log.append(appended)
+			if truncated {
+				snap, err := n.storage.LoadSnapshot()
+				if err != nil {
+					panic("raft: LoadSnapshot during conf replay failed: " + err.Error())
+				}
+				if err := n.replayConfig(snap); err != nil {
+					panic("raft: replayConfig after truncation failed: " + err.Error())
+				}
+			} else {
+				// Pure extension: just adopt the new entries' membership.
+				for _, e := range appended {
+					n.applyConfEntry(e)
+				}
+			}
 		}
 	}
 
@@ -267,9 +414,15 @@ func (n *Node) lastIndexOfTerm(term uint64) (uint64, bool) {
 }
 
 // advanceCommit recomputes the leader's commit index: the highest index N that
-// is replicated on a majority AND whose entry was created in the current term
-// (§5.4.2 — a leader never commits prior-term entries directly).  Caller must
-// hold the node mutex.
+// is replicated on a quorum AND whose entry was created in the current term
+// (§5.4.2 — a leader never commits prior-term entries directly).  "Quorum" is
+// evaluated through the node's ClusterConfig, so while joint it requires an
+// independent majority of both C_old and C_new.
+//
+// After advancing the commit index it calls completeMembershipChange, which
+// drives the second (joint-leaving) step of a membership change and any
+// leader step-down once the final configuration commits.  Caller must hold the
+// node mutex.
 func (n *Node) advanceCommit() {
 	last := n.log.lastIndex()
 	for N := last; N > n.commitIndex; N-- {
@@ -277,18 +430,13 @@ func (n *Node) advanceCommit() {
 		if err != nil || t != n.currentTerm {
 			continue
 		}
-		count := 0
-		for _, p := range n.peers {
-			if n.matchIndex[p] >= N {
-				count++
-			}
-		}
-		if count >= n.quorum() {
+		if n.clusterConfig.committed(n.matchIndex, n.id, last, N) {
 			n.commitIndex = N
 			n.log.commitTo(N)
-			return
+			break
 		}
 	}
+	n.completeMembershipChange()
 }
 
 // LogEntries returns the log entries in the half-open range [lo, hi).  It is

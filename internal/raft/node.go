@@ -105,6 +105,11 @@ type Node struct {
 	pendingSnap    Snapshot
 	hasPendingSnap bool
 
+	// clusterConfig is the node's current cluster-membership configuration.
+	// It is adopted on APPEND of an EntryConfChange — committed or not
+	// (§6) — and re-derived by replay after a log truncation.
+	clusterConfig ClusterConfig
+
 	rng *rand.Rand
 }
 
@@ -160,8 +165,92 @@ func NewNode(cfg Config) (*Node, error) {
 		votesGranted:       make(map[NodeID]bool),
 		rng:                rand.New(rand.NewSource(int64(hashID(cfg.ID)))), //nolint:gosec
 	}
+	// Seed cluster membership: the construction config's Peers form the
+	// initial simple configuration, then any persisted snapshot membership
+	// and EntryConfChange log entries are replayed over it so a restarted
+	// node recovers the correct membership.
+	n.clusterConfig = ClusterConfig{Voters: append([]NodeID(nil), peers...)}
+	if err := n.replayConfig(snap); err != nil {
+		return nil, err
+	}
 	n.resetElectionTimeout()
 	return n, nil
+}
+
+// replayConfig rebuilds the node's clusterConfig from durable state: it seeds
+// membership from the snapshot's recorded configuration (when present) and
+// then applies every EntryConfChange in the log, in index order, from
+// FirstIndex upward.  It is called once at construction and again after a log
+// truncation, so a node never carries a stale joint configuration.  Caller
+// must hold mu only when called post-construction; NewNode calls it before the
+// node is shared.
+func (n *Node) replayConfig(snap Snapshot) error {
+	// Start from the snapshot's membership if it recorded one; otherwise keep
+	// the construction-config seed already in clusterConfig.
+	if len(snap.Conf.Voters) > 0 {
+		n.clusterConfig = snap.Conf.clone()
+	}
+	first, err := n.storage.FirstIndex()
+	if err != nil {
+		return err
+	}
+	last, err := n.storage.LastIndex()
+	if err != nil {
+		return err
+	}
+	for i := first; i <= last; i++ {
+		es, err := n.storage.Entries(i, i+1)
+		if err != nil || len(es) != 1 {
+			// Compacted away or unavailable; skip — snapshot already
+			// accounts for everything below FirstIndex.
+			continue
+		}
+		n.applyConfEntry(es[0])
+	}
+	return nil
+}
+
+// applyConfEntry adopts a single log entry's membership effect if it is an
+// EntryConfChange: a joint-entering change drives enterJoint, a joint-leaving
+// change drives leaveJoint.  Non-conf entries are ignored.  It also ensures
+// per-peer replication progress exists for any newly added member.  Caller
+// must hold mu (except during construction).
+func (n *Node) applyConfEntry(e LogEntry) {
+	if e.Type != EntryConfChange {
+		return
+	}
+	cc, err := decodeConfChange(e.Data)
+	if err != nil {
+		panic("raft: undecodable EntryConfChange in log: " + err.Error())
+	}
+	if cc.Leave {
+		n.clusterConfig = n.clusterConfig.leaveJoint()
+	} else {
+		n.clusterConfig = n.clusterConfig.enterJoint(cc)
+	}
+	n.ensureProgress()
+}
+
+// ensureProgress makes sure nextIndex/matchIndex hold an entry for every
+// current cluster member other than this node, initializing newly added
+// members on demand.  It only mutates progress while this node is leader
+// (followers do not track per-peer progress).  Caller must hold mu.
+func (n *Node) ensureProgress() {
+	if n.role != Leader {
+		return
+	}
+	last := n.log.lastIndex()
+	for _, p := range n.clusterConfig.allMembers() {
+		if p == n.id {
+			continue
+		}
+		if _, ok := n.nextIndex[p]; !ok {
+			n.nextIndex[p] = last + 1
+		}
+		if _, ok := n.matchIndex[p]; !ok {
+			n.matchIndex[p] = 0
+		}
+	}
 }
 
 // hashID derives a deterministic seed from a NodeID so each node's election
@@ -244,7 +333,7 @@ func (n *Node) maybeBecomeLeader() bool {
 	if n.role != Candidate {
 		return false
 	}
-	if len(n.votesGranted) < n.quorum() {
+	if !n.clusterConfig.quorumReached(n.votesGranted) {
 		return false
 	}
 	n.becomeLeader()
@@ -266,7 +355,7 @@ func (n *Node) becomeLeader() {
 	last := n.log.lastIndex()
 	n.nextIndex = make(map[NodeID]uint64)
 	n.matchIndex = make(map[NodeID]uint64)
-	for _, p := range n.peers {
+	for _, p := range n.clusterConfig.allMembers() {
 		if p == n.id {
 			continue
 		}
@@ -314,4 +403,21 @@ func (n *Node) CommitIndex() uint64 {
 // ID returns the node's stable identifier.
 func (n *Node) ID() NodeID {
 	return n.id
+}
+
+// Members returns the current cluster membership: the deduplicated, sorted
+// union of the active voting set and (while a membership change is in flight)
+// the outgoing voting set.
+func (n *Node) Members() []NodeID {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.clusterConfig.allMembers()
+}
+
+// ConfigJoint reports whether the node is currently in a joint configuration —
+// i.e. a membership change has been appended to its log but not yet completed.
+func (n *Node) ConfigJoint() bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.clusterConfig.Joint
 }

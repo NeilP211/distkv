@@ -64,8 +64,9 @@ func (n *Node) dispatch(out []outMsg) {
 // buildRequestVotes collects a MsgRequestVote for every peer.  Caller must
 // hold the node mutex.
 func (n *Node) buildRequestVotes() []outMsg {
-	out := make([]outMsg, 0, len(n.peers)-1)
-	for _, p := range n.peers {
+	members := n.clusterConfig.allMembers()
+	out := make([]outMsg, 0, len(members))
+	for _, p := range members {
 		if p == n.id {
 			continue
 		}

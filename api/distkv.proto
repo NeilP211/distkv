@@ -34,6 +34,12 @@ message Snapshot {
   uint64 index = 1;
   uint64 term = 2;
   bytes data = 3;
+
+  // Cluster-membership configuration captured at the snapshot point, so a
+  // follower that installs the snapshot also recovers cluster membership.
+  repeated string voters = 4;
+  repeated string old_voters = 5;
+  bool joint = 6;
 }
 
 // Message is the wire representation of a raft.Message, used for internal

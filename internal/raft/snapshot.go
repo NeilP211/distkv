@@ -44,7 +44,7 @@ func (n *Node) CompactTo(index, term uint64, data []byte) error {
 		return nil
 	}
 
-	snap := Snapshot{Index: index, Term: term, Data: data}
+	snap := Snapshot{Index: index, Term: term, Data: data, Conf: n.clusterConfig.clone()}
 	if err := n.storage.SaveSnapshot(snap); err != nil {
 		return err
 	}
@@ -221,6 +221,15 @@ func (n *Node) handleInstallSnapshot(msg Message) Message {
 	n.commitIndex = snap.Index
 	n.lastApplied = snap.Index
 	n.log.commitIndex = snap.Index
+
+	// Restore cluster membership from the snapshot.  The snapshot supersedes
+	// the follower's log entirely, so its recorded configuration becomes the
+	// authoritative membership.  A snapshot produced before Phase 8 (or by a
+	// store that cannot persist Conf) carries an empty Voters set; in that
+	// case keep the existing configuration rather than wiping it.
+	if len(snap.Conf.Voters) > 0 {
+		n.clusterConfig = snap.Conf.clone()
+	}
 
 	// Record the snapshot for delivery to the state machine.  The most recent
 	// install wins if a previous one was not yet consumed.

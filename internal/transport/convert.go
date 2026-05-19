@@ -102,9 +102,12 @@ func snapshotToProto(s *raft.Snapshot) *api.Snapshot {
 		return nil
 	}
 	return &api.Snapshot{
-		Index: s.Index,
-		Term:  s.Term,
-		Data:  s.Data,
+		Index:     s.Index,
+		Term:      s.Term,
+		Data:      s.Data,
+		Voters:    nodeIDsToStrings(s.Conf.Voters),
+		OldVoters: nodeIDsToStrings(s.Conf.OldVoters),
+		Joint:     s.Conf.Joint,
 	}
 }
 
@@ -116,7 +119,34 @@ func snapshotFromProto(p *api.Snapshot) *raft.Snapshot {
 		Index: p.Index,
 		Term:  p.Term,
 		Data:  p.Data,
+		Conf: raft.ClusterConfig{
+			Voters:    stringsToNodeIDs(p.Voters),
+			OldVoters: stringsToNodeIDs(p.OldVoters),
+			Joint:     p.Joint,
+		},
 	}
+}
+
+func nodeIDsToStrings(ids []raft.NodeID) []string {
+	if ids == nil {
+		return nil
+	}
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[i] = string(id)
+	}
+	return out
+}
+
+func stringsToNodeIDs(ss []string) []raft.NodeID {
+	if ss == nil {
+		return nil
+	}
+	out := make([]raft.NodeID, len(ss))
+	for i, s := range ss {
+		out[i] = raft.NodeID(s)
+	}
+	return out
 }
 
 func msgTypeToProto(t raft.MsgType) api.MsgType {
