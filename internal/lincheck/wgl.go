@@ -1,6 +1,7 @@
 package lincheck
 
 import (
+	"encoding/binary"
 	"fmt"
 	"sort"
 )
@@ -89,15 +90,13 @@ func applies(op Operation, cur string) (next string, consistent bool) {
 // linearizableRegister runs the WGL algorithm on a single key's sub-history,
 // modelled as a string-valued register. It returns a witness string (only
 // meaningful when ok is false) and whether the sub-history linearizes.
+//
+// The linearized set is held in a multi-word bitset, so memoization works for a
+// per-key sub-history of any size — there is no un-memoized fallback that could
+// blow up on a pathologically concurrent key.
 func linearizableRegister(sub History) (witness string, ok bool) {
 	if len(sub) == 0 {
 		return "", true
-	}
-	if len(sub) > 63 {
-		// The visited-set memo key packs the linearized set into a uint64
-		// bitset. Per-key concurrency is modest in practice, but guard the
-		// bound explicitly rather than silently corrupting the memo.
-		return linearizableRegisterLarge(sub)
 	}
 
 	// Build the doubly-linked list of operations, ordered by call time so that
@@ -112,31 +111,27 @@ func linearizableRegister(sub History) (witness string, ok bool) {
 
 	head := &node{id: -1}
 	cur := head
-	nodes := make([]*node, len(ops))
 	for i := range ops {
 		n := &node{op: ops[i], id: i}
 		cur.next = n
 		n.prev = cur
 		cur = n
-		nodes[i] = n
 	}
 
-	// minReturn is the smallest effective return time among entries currently
-	// in the list. An operation may be chosen next only if its CallTime is not
-	// strictly greater than minReturn — otherwise some other not-yet-linearized
-	// operation must have finished before it started, so it cannot go first.
-	//
-	// We recompute minReturn lazily inside the search rather than maintaining
-	// it incrementally; the list is small per key.
-
+	// linearized is a bitset over op ids; mutated in place across the DFS and
+	// restored on backtrack, exactly mirroring the list splice-out/splice-in.
+	linearized := make([]uint64, (len(ops)+63)/64)
 	visited := make(map[memoKey]struct{})
 
-	var search func(value string, linearized uint64, remaining int) bool
-	search = func(value string, linearized uint64, remaining int) bool {
+	// An operation may be chosen next only if its CallTime is not strictly
+	// greater than the earliest pending return — otherwise some other
+	// not-yet-linearized operation finished before it started.
+	var search func(value string, remaining int) bool
+	search = func(value string, remaining int) bool {
 		if remaining == 0 {
 			return true
 		}
-		mk := memoKey{linearized: linearized, value: value}
+		mk := memoKey{linearized: bitsetKey(linearized), value: value}
 		if _, seen := visited[mk]; seen {
 			return false
 		}
@@ -151,8 +146,7 @@ func linearizableRegister(sub History) (witness string, ok bool) {
 
 		for n := head.next; n != nil; n = n.next {
 			// Real-time gate: n can be linearized next only if nothing else
-			// strictly precedes it (its call is at or before the earliest
-			// pending return).
+			// strictly precedes it.
 			if n.op.CallTime > minRet {
 				continue
 			}
@@ -160,15 +154,17 @@ func linearizableRegister(sub History) (witness string, ok bool) {
 			if !consistent {
 				continue
 			}
-			// Lift n out of the list.
+			// Lift n out of the list and mark it linearized.
 			n.prev.next = n.next
 			if n.next != nil {
 				n.next.prev = n.prev
 			}
-			if search(nextVal, linearized|(1<<uint(n.id)), remaining-1) {
+			linearized[n.id/64] |= 1 << uint(n.id%64)
+			if search(nextVal, remaining-1) {
 				return true
 			}
-			// Backtrack: splice n back exactly where it was.
+			// Backtrack: clear the bit and splice n back exactly where it was.
+			linearized[n.id/64] &^= 1 << uint(n.id%64)
 			n.prev.next = n
 			if n.next != nil {
 				n.next.prev = n
@@ -179,73 +175,19 @@ func linearizableRegister(sub History) (witness string, ok bool) {
 		return false
 	}
 
-	if search("", 0, len(ops)) {
+	if search("", len(ops)) {
 		return "", true
 	}
 	return failureWitness(ops), false
 }
 
-// linearizableRegisterLarge handles the rare case of a per-key sub-history
-// with more than 63 operations, where the uint64 bitset memo cannot be used.
-// It runs the same WGL search without memoization. Real DistKV per-key
-// concurrency is modest, so this fallback is acceptable; the search still
-// prunes via the real-time gate and consistency checks.
-func linearizableRegisterLarge(sub History) (witness string, ok bool) {
-	ops := append(History(nil), sub...)
-	sort.SliceStable(ops, func(i, j int) bool {
-		if ops[i].CallTime != ops[j].CallTime {
-			return ops[i].CallTime < ops[j].CallTime
-		}
-		return effReturn(ops[i]) < effReturn(ops[j])
-	})
-
-	head := &node{id: -1}
-	cur := head
-	for i := range ops {
-		n := &node{op: ops[i], id: i}
-		cur.next = n
-		n.prev = cur
-		cur = n
+// bitsetKey renders a bitset as a string so it can be a map key.
+func bitsetKey(words []uint64) string {
+	b := make([]byte, len(words)*8)
+	for i, w := range words {
+		binary.LittleEndian.PutUint64(b[i*8:], w)
 	}
-
-	var search func(value string, remaining int) bool
-	search = func(value string, remaining int) bool {
-		if remaining == 0 {
-			return true
-		}
-		minRet := int64(1<<63 - 1)
-		for n := head.next; n != nil; n = n.next {
-			if r := effReturn(n.op); r < minRet {
-				minRet = r
-			}
-		}
-		for n := head.next; n != nil; n = n.next {
-			if n.op.CallTime > minRet {
-				continue
-			}
-			nextVal, consistent := applies(n.op, value)
-			if !consistent {
-				continue
-			}
-			n.prev.next = n.next
-			if n.next != nil {
-				n.next.prev = n.prev
-			}
-			if search(nextVal, remaining-1) {
-				return true
-			}
-			n.prev.next = n
-			if n.next != nil {
-				n.next.prev = n
-			}
-		}
-		return false
-	}
-
-	if search("", len(ops)) {
-		return "", true
-	}
-	return failureWitness(ops), false
+	return string(b)
 }
 
 // effReturn is op's effective return time: ReturnTime, or "infinite" when the
@@ -259,11 +201,11 @@ func effReturn(op Operation) int64 {
 }
 
 // memoKey identifies a search configuration: which operations have been
-// linearized (as a bitset) and the resulting register value. Two paths that
-// reach the same configuration fail or succeed identically, so a failed
-// configuration can be memoized to prune the search.
+// linearized (as a string-encoded bitset) and the resulting register value.
+// Two paths that reach the same configuration fail or succeed identically, so
+// a failed configuration can be memoized to prune the search.
 type memoKey struct {
-	linearized uint64
+	linearized string
 	value      string
 }
 
