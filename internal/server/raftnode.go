@@ -59,6 +59,11 @@ type RaftNode struct {
 	// waiters maps a log index to the channel awaiting that entry's apply
 	// result.  Guarded by mu.
 	waiters map[uint64]chan proposalResult
+
+	// applied is the highest log index whose entry has been applied to the
+	// state machine.  Guarded by mu; read by LinearizableGet to know when a
+	// ReadIndex point has been reached.
+	applied uint64
 }
 
 // NewRaftNode constructs a RaftNode and its underlying raft.Node.  It does NOT
@@ -165,11 +170,24 @@ func (rn *RaftNode) applyLoop(ctx context.Context) {
 	}
 }
 
-// drainReady applies every committed-but-unapplied entry exactly once.
+// drainReady applies every committed-but-unapplied entry exactly once and
+// advances the applied-index watermark.
 func (rn *RaftNode) drainReady() {
 	for _, e := range rn.node.Ready() {
 		rn.applyEntry(e)
+		rn.mu.Lock()
+		if e.Index > rn.applied {
+			rn.applied = e.Index
+		}
+		rn.mu.Unlock()
 	}
+}
+
+// appliedIndex returns the highest log index applied to the state machine.
+func (rn *RaftNode) appliedIndex() uint64 {
+	rn.mu.Lock()
+	defer rn.mu.Unlock()
+	return rn.applied
 }
 
 // applyEntry applies a single log entry to the state machine and signals the

@@ -112,20 +112,28 @@ func (s *KVService) CAS(ctx context.Context, req *api.CASReq) (*api.CASResp, err
 	return &api.CASResp{Success: true}, nil
 }
 
-// Get retrieves the value for a key.
+// Get retrieves the value for a key with a linearizable read (ReadIndex).
 //
-// Phase 6b: replace with ReadIndex.  For now, only the leader serves reads —
-// reading from its local state machine after confirming leadership.  A
-// non-leader returns found=false; the GetResp proto has no leader_hint field,
-// so a client detects "not leader here" by the absent value and should call
-// Status to learn the leader.
-func (s *KVService) Get(_ context.Context, req *api.GetReq) (*api.GetResp, error) {
-	if s.node.Status().Role != raft.Leader.String() {
+// Only the leader serves reads, and only after confirming via a heartbeat
+// round that it still holds leadership — so a deposed leader cannot return
+// stale data.  A non-leader returns a normal response with found=false; the
+// GetResp proto has no leader_hint field, so a client detects "not leader
+// here" by the absent value and should call Status to learn the leader.  A
+// leader that loses leadership mid-read returns codes.Unavailable so the
+// client retries against another node.
+func (s *KVService) Get(ctx context.Context, req *api.GetReq) (*api.GetResp, error) {
+	v, found, err := s.node.LinearizableGet(ctx, req.GetKey())
+	if errors.Is(err, raft.ErrNotLeader) {
 		// Not the leader: refuse to serve a possibly-stale read.
 		return &api.GetResp{Found: false}, nil
 	}
-	v, ok := s.node.LocalGet(req.GetKey())
-	return &api.GetResp{Value: []byte(v), Found: ok}, nil
+	if errors.Is(err, ErrLeadershipLost) {
+		return nil, status.Error(codes.Unavailable, "leadership lost during read")
+	}
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "get failed: %v", err)
+	}
+	return &api.GetResp{Value: []byte(v), Found: found}, nil
 }
 
 // Status returns the current cluster status.
