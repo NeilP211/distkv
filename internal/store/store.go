@@ -11,21 +11,32 @@ import (
 type OpType int
 
 const (
+	// OpPut sets the value for a key.
 	OpPut OpType = iota
+	// OpDelete removes a key from the store.
 	OpDelete
+	// OpCAS performs a compare-and-swap: sets the value only if the current
+	// value matches ExpectValue.
 	OpCAS
 )
 
 // Command is a KV operation to be applied to the state machine.
 type Command struct {
-	Op          OpType
-	Key, Value  string
+	// Op is the operation type (OpPut, OpDelete, or OpCAS).
+	Op OpType
+	// Key is the key to operate on.
+	// Value is the value to set (used by OpPut and OpCAS).
+	Key, Value string
+	// ExpectValue is the expected current value; only used by OpCAS.
 	ExpectValue string
 }
 
 // ErrCASMismatch is returned by Apply when a CAS operation fails because the
 // current value does not match ExpectValue.
 var ErrCASMismatch = errors.New("store: CAS mismatch")
+
+// ErrUnknownOp is returned by Apply when the Command carries an unrecognised OpType.
+var ErrUnknownOp = errors.New("store: unknown op")
 
 // Store is an in-memory key-value state machine guarded by a RWMutex.
 type Store struct {
@@ -65,7 +76,7 @@ func (s *Store) Apply(cmd Command) (string, error) {
 		return cmd.Value, nil
 
 	default:
-		return "", errors.New("store: unknown op")
+		return "", ErrUnknownOp
 	}
 }
 

@@ -52,7 +52,9 @@ func TestDurableStoreCASRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenDurable: %v", err)
 	}
-	ds.Do(Command{Op: OpPut, Key: "x", Value: "old"})
+	if _, err := ds.Do(Command{Op: OpPut, Key: "x", Value: "old"}); err != nil {
+		t.Fatalf("Do: %v", err)
+	}
 	result, err := ds.Do(Command{Op: OpCAS, Key: "x", Value: "new", ExpectValue: "old"})
 	if err != nil {
 		t.Fatalf("CAS Do: %v", err)
@@ -60,7 +62,9 @@ func TestDurableStoreCASRecovery(t *testing.T) {
 	if result != "new" {
 		t.Fatalf("CAS result: want %q, got %q", "new", result)
 	}
-	ds.Close()
+	if err := ds.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
 
 	ds2, err := OpenDurable(dir)
 	if err != nil {
@@ -80,9 +84,15 @@ func TestDurableStoreDeleteRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenDurable: %v", err)
 	}
-	ds.Do(Command{Op: OpPut, Key: "del", Value: "present"})
-	ds.Do(Command{Op: OpDelete, Key: "del"})
-	ds.Close()
+	if _, err := ds.Do(Command{Op: OpPut, Key: "del", Value: "present"}); err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if _, err := ds.Do(Command{Op: OpDelete, Key: "del"}); err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if err := ds.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
 
 	ds2, err := OpenDurable(dir)
 	if err != nil {
@@ -149,12 +159,16 @@ func TestDurableStoreCASMismatchNotPersisted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenDurable: %v", err)
 	}
-	ds.Do(Command{Op: OpPut, Key: "m", Value: "val"})
+	if _, err := ds.Do(Command{Op: OpPut, Key: "m", Value: "val"}); err != nil {
+		t.Fatalf("Do: %v", err)
+	}
 	_, err = ds.Do(Command{Op: OpCAS, Key: "m", Value: "new", ExpectValue: "wrong"})
 	if !errors.Is(err, ErrCASMismatch) {
 		t.Fatalf("want ErrCASMismatch, got %v", err)
 	}
-	ds.Close()
+	if err := ds.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
 
 	// On recovery, m must still be "val".
 	ds2, err := OpenDurable(dir)

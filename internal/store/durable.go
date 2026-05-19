@@ -3,6 +3,7 @@ package store
 import (
 	"bytes"
 	"encoding/gob"
+	"errors"
 	"path/filepath"
 
 	"github.com/NeilP211/distkv/internal/wal"
@@ -11,6 +12,8 @@ import (
 // DurableStore wraps an in-memory Store with a WAL for crash recovery.
 // Every command is serialized and appended to the WAL before being applied,
 // so a crash never leaves an applied-but-unlogged write.
+// DurableStore is not safe for concurrent calls to Do and is designed to be
+// driven by a single writer (e.g. the Raft apply loop).
 type DurableStore struct {
 	*Store
 	w *wal.WAL
@@ -38,7 +41,7 @@ func OpenDurable(dir string) (*DurableStore, error) {
 		_, err := s.Apply(cmd)
 		// Ignore ErrCASMismatch during replay — it was already applied
 		// (or already failed) in a previous session; we must not error out.
-		if err != nil && err != ErrCASMismatch {
+		if err != nil && !errors.Is(err, ErrCASMismatch) {
 			return err
 		}
 		return nil
@@ -65,6 +68,12 @@ func (d *DurableStore) Do(cmd Command) (string, error) {
 	}
 
 	return d.Store.Apply(cmd)
+}
+
+// Apply is shadowed to route through Do, ensuring every mutation is
+// written to the WAL before being applied. Callers should prefer Do.
+func (d *DurableStore) Apply(cmd Command) (string, error) {
+	return d.Do(cmd)
 }
 
 // Close closes the underlying WAL.
