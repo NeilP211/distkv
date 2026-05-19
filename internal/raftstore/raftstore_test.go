@@ -228,7 +228,29 @@ func testStorageConformance(t *testing.T, newStore func() raft.Storage) {
 		}
 	})
 
-	// ── 9. Term(index) for index above LastIndex: ErrUnavailable ─────────
+	// ── 9. Entries(lo, lo) below FirstIndex: ErrCompacted ────────────────
+	t.Run("EntriesLoLoCompacted", func(t *testing.T) {
+		s := newStore()
+		if err := s.AppendEntries([]raft.LogEntry{
+			ent(1, 1), ent(1, 2), ent(2, 3),
+		}); err != nil {
+			t.Fatalf("AppendEntries: %v", err)
+		}
+		snap := raft.Snapshot{Index: 2, Term: 1, Data: []byte("snap")}
+		if err := s.SaveSnapshot(snap); err != nil {
+			t.Fatalf("SaveSnapshot: %v", err)
+		}
+		if err := s.Compact(2); err != nil {
+			t.Fatalf("Compact(2): %v", err)
+		}
+		// lo == hi == 1 is below FirstIndex (3); must return ErrCompacted.
+		_, err := s.Entries(1, 1)
+		if !errors.Is(err, raft.ErrCompacted) {
+			t.Fatalf("Entries(1,1) below FirstIndex = %v; want ErrCompacted", err)
+		}
+	})
+
+	// ── 10. Term(index) for index above LastIndex: ErrUnavailable ────────
 	t.Run("TermAboveLastIndex", func(t *testing.T) {
 		s := newStore()
 		if err := s.AppendEntries([]raft.LogEntry{ent(1, 1)}); err != nil {

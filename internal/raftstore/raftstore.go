@@ -224,9 +224,6 @@ func (s *BoltStorage) Entries(lo, hi uint64) ([]raft.LogEntry, error) {
 	if lo > hi {
 		return nil, errors.New("raftstore: Entries lo > hi")
 	}
-	if lo == hi {
-		return nil, nil
-	}
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -236,16 +233,16 @@ func (s *BoltStorage) Entries(lo, hi uint64) ([]raft.LogEntry, error) {
 		return nil, raft.ErrCompacted
 	}
 
+	if lo == hi {
+		return nil, nil
+	}
+
 	var out []raft.LogEntry
 	err := s.db.View(func(tx *bolt.Tx) error {
 		lb := tx.Bucket(bucketLog)
 
 		// Check hi-1 is available.
 		if lb.Get(indexKey(hi-1)) == nil {
-			// hi might be exactly lastIndex+1 — check lo..hi-1 exist.
-			if lb.Get(indexKey(lo)) == nil {
-				return raft.ErrUnavailable
-			}
 			return raft.ErrUnavailable
 		}
 
@@ -319,13 +316,6 @@ func (s *BoltStorage) Term(index uint64) (uint64, error) {
 	err := s.db.View(func(tx *bolt.Tx) error {
 		v := tx.Bucket(bucketLog).Get(indexKey(index))
 		if v == nil {
-			// Determine if beyond the end of the log.
-			// We'll check last key.
-			lb := tx.Bucket(bucketLog)
-			k, _ := lb.Cursor().Last()
-			if k == nil || indexFromKey(k) < index {
-				return raft.ErrUnavailable
-			}
 			return raft.ErrUnavailable
 		}
 		var e raft.LogEntry
