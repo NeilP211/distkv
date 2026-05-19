@@ -1,0 +1,179 @@
+syntax = "proto3";
+
+package distkv;
+
+option go_package = "github.com/NeilP211/distkv/api;api";
+
+// EntryType distinguishes the kind of log entry.
+enum EntryType {
+  ENTRY_NORMAL = 0;
+  ENTRY_CONF_CHANGE = 1;
+  ENTRY_NOOP = 2;
+}
+
+// MsgType identifies the kind of Raft RPC message.
+enum MsgType {
+  MSG_REQUEST_VOTE = 0;
+  MSG_REQUEST_VOTE_RESP = 1;
+  MSG_APPEND_ENTRIES = 2;
+  MSG_APPEND_ENTRIES_RESP = 3;
+  MSG_INSTALL_SNAPSHOT = 4;
+  MSG_INSTALL_SNAPSHOT_RESP = 5;
+}
+
+// LogEntry is a single entry in the Raft log.
+message LogEntry {
+  uint64 term = 1;
+  uint64 index = 2;
+  EntryType type = 3;
+  bytes data = 4;
+}
+
+// Snapshot holds a point-in-time snapshot of the state machine.
+message Snapshot {
+  uint64 index = 1;
+  uint64 term = 2;
+  bytes data = 3;
+}
+
+// Message is the wire representation of a raft.Message, used for internal
+// Raft RPCs between cluster members.
+message Message {
+  MsgType type = 1;
+  string from = 2;
+  string to = 3;
+  uint64 term = 4;
+
+  // RequestVote fields.
+  uint64 last_log_index = 5;
+  uint64 last_log_term = 6;
+  bool vote_granted = 7;
+
+  // AppendEntries fields.
+  uint64 prev_log_index = 8;
+  uint64 prev_log_term = 9;
+  uint64 leader_commit = 10;
+  repeated LogEntry entries = 11;
+  bool success = 12;
+  uint64 conflict_index = 13;
+  uint64 conflict_term = 14;
+
+  // InstallSnapshot field.
+  Snapshot snapshot = 15;
+
+  // ReadIndex piggyback.
+  uint64 read_id = 16;
+}
+
+// ----- KV Service request/response messages -----
+
+// PutReq is the request for a Put operation.
+message PutReq {
+  string key = 1;
+  bytes value = 2;
+}
+
+// PutResp is the response for a Put operation.
+message PutResp {
+  bool success = 1;
+  // leader_hint is the address of the current leader, if known, so the client
+  // can redirect.
+  string leader_hint = 2;
+}
+
+// GetReq is the request for a Get operation.
+message GetReq {
+  string key = 1;
+}
+
+// GetResp is the response for a Get operation.
+message GetResp {
+  bytes value = 1;
+  bool found = 2;
+}
+
+// DeleteReq is the request for a Delete operation.
+message DeleteReq {
+  string key = 1;
+}
+
+// DeleteResp is the response for a Delete operation.
+message DeleteResp {
+  bool success = 1;
+  string leader_hint = 2;
+}
+
+// CASReq is the request for a compare-and-swap operation.
+message CASReq {
+  string key = 1;
+  bytes expect_value = 2;
+  bytes new_value = 3;
+}
+
+// CASResp is the response for a compare-and-swap operation.
+message CASResp {
+  bool success = 1;
+  string leader_hint = 2;
+}
+
+// StatusReq is the request for cluster status.
+message StatusReq {}
+
+// StatusResp contains current cluster status.
+message StatusResp {
+  string leader_id = 1;
+  uint64 term = 2;
+  // role is the self-reported role of the node: "leader", "follower", or
+  // "candidate".
+  string role = 3;
+  uint64 commit_index = 4;
+  repeated string member_ids = 5;
+}
+
+// AddNodeReq requests that a new node be added to the cluster.
+message AddNodeReq {
+  string node_id = 1;
+  // addr is the network address of the new node.
+  string addr = 2;
+}
+
+// AddNodeResp is the response for an AddNode operation.
+message AddNodeResp {
+  bool success = 1;
+  string leader_hint = 2;
+}
+
+// RemoveNodeReq requests that a node be removed from the cluster.
+message RemoveNodeReq {
+  string node_id = 1;
+}
+
+// RemoveNodeResp is the response for a RemoveNode operation.
+message RemoveNodeResp {
+  bool success = 1;
+  string leader_hint = 2;
+}
+
+// RaftService handles internal Raft RPC traffic between cluster members.
+service RaftService {
+  // Step delivers a Raft message to the target node and returns its response.
+  rpc Step(Message) returns (Message);
+}
+
+// KV is the client-facing key-value API.
+service KV {
+  // Put sets key to value.
+  rpc Put(PutReq) returns (PutResp);
+  // Get retrieves the value for key.
+  rpc Get(GetReq) returns (GetResp);
+  // Delete removes a key.
+  rpc Delete(DeleteReq) returns (DeleteResp);
+  // CAS performs a compare-and-swap.
+  rpc CAS(CASReq) returns (CASResp);
+  // Status returns the current cluster status.
+  rpc Status(StatusReq) returns (StatusResp);
+  // AddNode adds a new member to the cluster.
+  rpc AddNode(AddNodeReq) returns (AddNodeResp);
+  // RemoveNode removes a member from the cluster.
+  rpc RemoveNode(RemoveNodeReq) returns (RemoveNodeResp);
+}
