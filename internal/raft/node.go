@@ -98,6 +98,13 @@ type Node struct {
 	// votesGranted tracks votes received in the current candidate term.
 	votesGranted map[NodeID]bool
 
+	// pendingSnap holds a snapshot that was just installed via
+	// MsgInstallSnapshot and has not yet been handed to the state machine.
+	// hasPendingSnap distinguishes "no pending snapshot" from a zero-value
+	// snapshot.  Both are guarded by mu and consumed by PendingSnapshot.
+	pendingSnap    Snapshot
+	hasPendingSnap bool
+
 	rng *rand.Rand
 }
 
@@ -124,6 +131,16 @@ func NewNode(cfg Config) (*Node, error) {
 	copy(peers, cfg.Peers)
 	sort.Slice(peers, func(i, j int) bool { return peers[i] < peers[j] })
 
+	// If Storage already holds a snapshot at index N, everything it covers is
+	// committed and applied by definition.  newRaftLog seeds commitIndex from
+	// the snapshot; lastApplied must be seeded the same way, otherwise Ready()
+	// would try to slice log entries at indices the snapshot has compacted
+	// away (a known Phase 5 gap).
+	snap, err := cfg.Storage.LoadSnapshot()
+	if err != nil {
+		return nil, err
+	}
+
 	n := &Node{
 		id:                 cfg.ID,
 		peers:              peers,
@@ -132,6 +149,7 @@ func NewNode(cfg Config) (*Node, error) {
 		votedFor:           hs.VotedFor,
 		log:                rlog,
 		commitIndex:        rlog.commitIndex,
+		lastApplied:        snap.Index,
 		nextIndex:          make(map[NodeID]uint64),
 		matchIndex:         make(map[NodeID]uint64),
 		storage:            cfg.Storage,

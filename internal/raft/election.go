@@ -109,6 +109,10 @@ func (n *Node) Step(msg Message) Message {
 		resp = n.handleAppendEntries(msg)
 	case MsgAppendEntriesResp:
 		out = n.handleAppendEntriesResp(msg)
+	case MsgInstallSnapshot:
+		resp = n.handleInstallSnapshot(msg)
+	case MsgInstallSnapshotResp:
+		out = n.handleInstallSnapshotResp(msg)
 	}
 	n.mu.Unlock()
 

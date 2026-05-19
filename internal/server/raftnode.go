@@ -27,6 +27,11 @@ const applyPoll = 5 * time.Millisecond
 // waiter, so a small cap is ample; the lowest indices are evicted past it.
 const maxPendingResults = 64
 
+// defaultSnapshotThreshold is the number of applied-but-not-yet-compacted log
+// entries that triggers an automatic snapshot when RaftNodeConfig leaves
+// SnapshotThreshold unset.
+const defaultSnapshotThreshold = 1000
+
 // RaftNodeConfig configures a RaftNode: the embedded raft.Config plus the
 // real-time tick duration that drives raft.Node.Tick.
 type RaftNodeConfig struct {
@@ -36,6 +41,10 @@ type RaftNodeConfig struct {
 	// Election/heartbeat timeouts in Raft.Config are expressed in Ticks, so
 	// the effective timeouts are TickInterval multiplied by those counts.
 	TickInterval time.Duration
+	// SnapshotThreshold is the number of applied log entries past the current
+	// snapshot point that triggers an automatic snapshot + log compaction.
+	// Zero means use defaultSnapshotThreshold.
+	SnapshotThreshold uint64
 }
 
 // proposalResult carries the outcome of applying a proposed command back to
@@ -51,9 +60,14 @@ type proposalResult struct {
 type RaftNode struct {
 	node    *raft.Node
 	sm      *store.Store
+	storage raft.Storage  // the same Storage handed to raft.NewNode
 	members []raft.NodeID // cluster members, captured at construction
 
 	tickInterval time.Duration
+
+	// snapshotThreshold is the applied-entries-past-snapshot count that
+	// triggers automatic compaction.  Set at construction; never mutated.
+	snapshotThreshold uint64
 
 	mu       sync.Mutex
 	started  bool
@@ -93,14 +107,20 @@ func NewRaftNode(cfg RaftNodeConfig) (*RaftNode, error) {
 	}
 	members := make([]raft.NodeID, len(cfg.Raft.Peers))
 	copy(members, cfg.Raft.Peers)
+	threshold := cfg.SnapshotThreshold
+	if threshold == 0 {
+		threshold = defaultSnapshotThreshold
+	}
 	return &RaftNode{
-		node:         node,
-		sm:           store.New(),
-		members:      members,
-		tickInterval: cfg.TickInterval,
-		applyNow:     make(chan struct{}, 1),
-		waiters:      make(map[uint64]chan proposalResult),
-		pending:      make(map[uint64]proposalResult),
+		node:              node,
+		sm:                store.New(),
+		storage:           cfg.Raft.Storage,
+		members:           members,
+		tickInterval:      cfg.TickInterval,
+		snapshotThreshold: threshold,
+		applyNow:          make(chan struct{}, 1),
+		waiters:           make(map[uint64]chan proposalResult),
+		pending:           make(map[uint64]proposalResult),
 	}, nil
 }
 
@@ -117,9 +137,40 @@ func (rn *RaftNode) Start() {
 	rn.cancel = cancel
 	rn.mu.Unlock()
 
+	// Restore the state machine from any snapshot already on disk before the
+	// apply loop runs.  raft.NewNode seeds lastApplied to the snapshot index,
+	// so the apply loop will replay only the post-snapshot log tail; the
+	// snapshot must therefore be loaded into the store first.
+	rn.restoreFromSnapshot()
+
 	rn.wg.Add(2)
 	go rn.tickLoop(ctx)
 	go rn.applyLoop(ctx)
+}
+
+// restoreFromSnapshot loads any persisted Raft snapshot into the state machine
+// and advances the applied watermark to the snapshot index.  It is a no-op
+// when Storage holds no snapshot.  Called once by Start, before the apply
+// loop is launched.
+func (rn *RaftNode) restoreFromSnapshot() {
+	if rn.storage == nil {
+		return
+	}
+	snap, err := rn.storage.LoadSnapshot()
+	if err != nil {
+		panic("server: LoadSnapshot during Start failed: " + err.Error())
+	}
+	if snap.Index == 0 {
+		return // no snapshot
+	}
+	if err := rn.sm.Restore(snap.Data); err != nil {
+		panic("server: Restore from snapshot during Start failed: " + err.Error())
+	}
+	rn.mu.Lock()
+	if snap.Index > rn.applied {
+		rn.applied = snap.Index
+	}
+	rn.mu.Unlock()
 }
 
 // Stop cleanly stops the ticker and apply-loop goroutines.  It is idempotent
@@ -190,9 +241,17 @@ func (rn *RaftNode) applyLoop(ctx context.Context) {
 	}
 }
 
-// drainReady applies every committed-but-unapplied entry exactly once and
-// advances the applied-index watermark.
+// drainReady applies every committed-but-unapplied entry exactly once,
+// advances the applied-index watermark, installs any snapshot the Raft core
+// received from a leader, and triggers automatic log compaction when the
+// applied log has grown past the snapshot threshold.
 func (rn *RaftNode) drainReady() {
+	// A snapshot installed by the Raft core (MsgInstallSnapshot) replaces the
+	// state machine wholesale.  Consume it before draining entries: raft has
+	// already advanced its own commit/applied watermarks to the snapshot
+	// index, so Ready() will only return strictly-newer entries afterwards.
+	rn.consumePendingSnapshot()
+
 	for _, e := range rn.node.Ready() {
 		rn.applyEntry(e)
 		rn.mu.Lock()
@@ -200,6 +259,55 @@ func (rn *RaftNode) drainReady() {
 			rn.applied = e.Index
 		}
 		rn.mu.Unlock()
+	}
+
+	rn.maybeSnapshot()
+}
+
+// consumePendingSnapshot checks the Raft core for a snapshot just installed
+// from a leader and, if present, restores the state machine from it and
+// advances the applied watermark.  PendingSnapshot delivers each installed
+// snapshot exactly once, so the restore happens exactly once per install.
+func (rn *RaftNode) consumePendingSnapshot() {
+	snap, ok := rn.node.PendingSnapshot()
+	if !ok {
+		return
+	}
+	if err := rn.sm.Restore(snap.Data); err != nil {
+		panic("server: Restore from installed snapshot failed: " + err.Error())
+	}
+	rn.mu.Lock()
+	if snap.Index > rn.applied {
+		rn.applied = snap.Index
+	}
+	rn.mu.Unlock()
+}
+
+// maybeSnapshot captures a state-machine snapshot and compacts the Raft log
+// when the number of applied entries past the current snapshot point exceeds
+// snapshotThreshold.  It is called at the end of every drainReady cycle.
+func (rn *RaftNode) maybeSnapshot() {
+	applied := rn.appliedIndex()
+	first := rn.node.FirstIndex() // = snapshotIndex + 1
+	if applied < first || applied-(first-1) < rn.snapshotThreshold {
+		return
+	}
+	// Capture the term of the applied index before snapshotting; if it is no
+	// longer in the log (a concurrent install raced us) skip this round.
+	term, err := rn.node.TermOf(applied)
+	if err != nil {
+		return
+	}
+	data, err := rn.sm.Snapshot()
+	if err != nil {
+		panic("server: store.Snapshot failed: " + err.Error())
+	}
+	if err := rn.node.CompactTo(applied, term, data); err != nil {
+		// ErrSnapshotOutOfRange can occur if applied raced ahead of the raft
+		// core's lastApplied; it is transient and retried next cycle.
+		if !errors.Is(err, raft.ErrSnapshotOutOfRange) {
+			panic("server: CompactTo failed: " + err.Error())
+		}
 	}
 }
 

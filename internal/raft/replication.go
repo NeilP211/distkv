@@ -29,46 +29,69 @@ func (n *Node) Propose(data []byte) (uint64, error) {
 	return idx, nil
 }
 
-// buildAppendEntries collects a MsgAppendEntries for every peer based on its
-// nextIndex.  Caller must hold the node mutex; the node must be the leader.
+// buildAppendEntries collects a replication message for every peer based on
+// its nextIndex.  For a peer whose nextIndex still lies within the leader's
+// log it is a MsgAppendEntries; for a peer that has fallen behind the leader's
+// compacted log boundary it is a MsgInstallSnapshot.  Caller must hold the
+// node mutex; the node must be the leader.
 func (n *Node) buildAppendEntries() []outMsg {
 	out := make([]outMsg, 0, len(n.peers)-1)
-	last := n.log.lastIndex()
 	for _, p := range n.peers {
 		if p == n.id {
 			continue
 		}
-		next := n.nextIndex[p]
-		if next < 1 {
-			next = 1
-		}
-		prevIndex := next - 1
-		prevTerm, err := n.log.term(prevIndex)
-		if err != nil {
-			// prevIndex has been compacted away; a snapshot is needed.
-			// Snapshot transfer is a Phase 5 concern — skip this peer.
-			continue
-		}
-		var entries []LogEntry
-		if next <= last {
-			es, err := n.log.slice(next, last+1)
-			if err != nil {
-				continue
-			}
-			entries = es
-		}
-		out = append(out, outMsg{to: p, msg: Message{
-			Type:         MsgAppendEntries,
-			From:         n.id,
-			To:           p,
-			Term:         n.currentTerm,
-			PrevLogIndex: prevIndex,
-			PrevLogTerm:  prevTerm,
-			LeaderCommit: n.commitIndex,
-			Entries:      entries,
-		}})
+		out = append(out, n.buildReplication(p)...)
 	}
 	return out
+}
+
+// buildReplication builds the single replication message owed to one peer:
+// MsgAppendEntries when the entries it needs are still in the log, or
+// MsgInstallSnapshot when they have been compacted away.  Caller must hold the
+// node mutex; the node must be the leader.  It returns nil if no message can
+// be built for the peer this round.
+func (n *Node) buildReplication(peer NodeID) []outMsg {
+	first, err := n.storage.FirstIndex()
+	if err != nil {
+		panic("raft: storage.FirstIndex failed: " + err.Error())
+	}
+	next := n.nextIndex[peer]
+	if next < 1 {
+		next = 1
+	}
+	// The leader needs the entry at prevIndex (= next-1) to build a valid
+	// AppendEntries.  If prevIndex precedes the first index the log can serve,
+	// those entries are gone — the peer must be caught up with a snapshot.
+	prevIndex := next - 1
+	if prevIndex < first-1 {
+		return n.buildInstallSnapshot(peer)
+	}
+
+	last := n.log.lastIndex()
+	prevTerm, err := n.log.term(prevIndex)
+	if err != nil {
+		// prevIndex compacted away despite the bound check (a concurrent
+		// compaction); fall back to a snapshot.
+		return n.buildInstallSnapshot(peer)
+	}
+	var entries []LogEntry
+	if next <= last {
+		es, err := n.log.slice(next, last+1)
+		if err != nil {
+			return n.buildInstallSnapshot(peer)
+		}
+		entries = es
+	}
+	return []outMsg{{to: peer, msg: Message{
+		Type:         MsgAppendEntries,
+		From:         n.id,
+		To:           peer,
+		Term:         n.currentTerm,
+		PrevLogIndex: prevIndex,
+		PrevLogTerm:  prevTerm,
+		LeaderCommit: n.commitIndex,
+		Entries:      entries,
+	}}}
 }
 
 // handleAppendEntries processes a MsgAppendEntries from a leader and returns
@@ -214,8 +237,10 @@ func (n *Node) handleAppendEntriesResp(msg Message) []outMsg {
 		next = 1
 	}
 	n.nextIndex[msg.From] = next
-	// Retry replication to this peer immediately.
-	return n.buildAppendEntriesFor(msg.From)
+	// Retry replication to this peer immediately.  buildReplication switches
+	// to MsgInstallSnapshot automatically if the backoff walked nextIndex
+	// below the leader's compacted log boundary.
+	return n.buildReplication(msg.From)
 }
 
 // lastIndexOfTerm returns the highest index in the leader's log whose entry
@@ -239,17 +264,6 @@ func (n *Node) lastIndexOfTerm(term uint64) (uint64, bool) {
 		}
 	}
 	return 0, false
-}
-
-// buildAppendEntriesFor builds a single MsgAppendEntries for one peer.  Caller
-// must hold the node mutex.
-func (n *Node) buildAppendEntriesFor(peer NodeID) []outMsg {
-	for _, o := range n.buildAppendEntries() {
-		if o.to == peer {
-			return []outMsg{o}
-		}
-	}
-	return nil
 }
 
 // advanceCommit recomputes the leader's commit index: the highest index N that
