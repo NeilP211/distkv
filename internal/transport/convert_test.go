@@ -17,6 +17,16 @@ func TestConvertRoundTrip(t *testing.T) {
 	t.Parallel()
 
 	snap := &raft.Snapshot{Index: 99, Term: 3, Data: []byte("snap-data")}
+	// A snapshot taken mid-membership-change carries a joint ClusterConfig;
+	// the voters/old_voters/joint fields must survive the proto round-trip.
+	snapWithConf := &raft.Snapshot{
+		Index: 120, Term: 4, Data: []byte("joint-snap"),
+		Conf: raft.ClusterConfig{
+			Voters:    []raft.NodeID{"n1", "n2", "n3", "n4"},
+			OldVoters: []raft.NodeID{"n1", "n2", "n3"},
+			Joint:     true,
+		},
+	}
 	entries := []raft.LogEntry{
 		{Term: 2, Index: 10, Type: raft.EntryNormal, Data: []byte("cmd1")},
 		{Term: 2, Index: 11, Type: raft.EntryConfChange, Data: []byte("cfg")},
@@ -115,6 +125,16 @@ func TestConvertRoundTrip(t *testing.T) {
 				To:       "follower",
 				Term:     10,
 				Snapshot: snap,
+			},
+		},
+		{
+			name: "MsgInstallSnapshot_joint_conf",
+			msg: raft.Message{
+				Type:     raft.MsgInstallSnapshot,
+				From:     "leader",
+				To:       "follower",
+				Term:     11,
+				Snapshot: snapWithConf,
 			},
 		},
 		{

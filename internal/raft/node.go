@@ -68,8 +68,7 @@ type Config struct {
 type Node struct {
 	mu sync.Mutex
 
-	id    NodeID
-	peers []NodeID // sorted, includes self
+	id NodeID
 
 	role        Role
 	currentTerm uint64
@@ -148,7 +147,6 @@ func NewNode(cfg Config) (*Node, error) {
 
 	n := &Node{
 		id:                 cfg.ID,
-		peers:              peers,
 		role:               Follower,
 		currentTerm:        hs.CurrentTerm,
 		votedFor:           hs.VotedFor,
@@ -365,11 +363,6 @@ func (n *Node) becomeLeader() {
 		n.matchIndex[p] = 0
 	}
 	n.matchIndex[n.id] = last
-}
-
-// quorum returns the number of nodes that constitute a majority.
-func (n *Node) quorum() int {
-	return len(n.peers)/2 + 1
 }
 
 // Role returns the node's current role.

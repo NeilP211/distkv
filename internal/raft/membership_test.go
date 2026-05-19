@@ -291,3 +291,66 @@ func TestMembershipRecoveredOnRestart(t *testing.T) {
 		t.Fatalf("restarted n1 Members() = %v, want %v", got, all4)
 	}
 }
+
+// TestMembershipRecoveredFromSnapshotConf verifies that a node constructed from
+// storage holding a snapshot recovers its membership from the snapshot's
+// recorded ClusterConfig, overriding the construction-config peer seed.
+func TestMembershipRecoveredFromSnapshotConf(t *testing.T) {
+	st := raft.NewMemStorage()
+	if err := st.SaveSnapshot(raft.Snapshot{
+		Index: 5, Term: 2, Data: []byte("state"),
+		Conf: raft.ClusterConfig{Voters: []raft.NodeID{"n1", "n2", "n3", "n4"}},
+	}); err != nil {
+		t.Fatalf("SaveSnapshot: %v", err)
+	}
+	nd, err := raft.NewNode(raft.Config{
+		ID:                 "n1",
+		Peers:              []raft.NodeID{"n1", "n2", "n3"}, // stale seed
+		Storage:            st,
+		Transport:          &countingTransport{},
+		ElectionTimeoutMin: 10,
+		ElectionTimeoutMax: 20,
+		HeartbeatInterval:  3,
+	})
+	if err != nil {
+		t.Fatalf("NewNode: %v", err)
+	}
+	want := []raft.NodeID{"n1", "n2", "n3", "n4"}
+	if got := nd.Members(); !sameIDs(got, want) {
+		t.Fatalf("Members() = %v, want %v (snapshot Conf must override the peer seed)", got, want)
+	}
+}
+
+// TestMembershipRestoredFromInstallSnapshot verifies that a follower installing
+// a snapshot via MsgInstallSnapshot restores its membership from the snapshot's
+// ClusterConfig.
+func TestMembershipRestoredFromInstallSnapshot(t *testing.T) {
+	nd, err := raft.NewNode(raft.Config{
+		ID:                 "f",
+		Peers:              []raft.NodeID{"f", "x", "y"},
+		Storage:            raft.NewMemStorage(),
+		Transport:          &countingTransport{},
+		ElectionTimeoutMin: 10,
+		ElectionTimeoutMax: 20,
+		HeartbeatInterval:  3,
+	})
+	if err != nil {
+		t.Fatalf("NewNode: %v", err)
+	}
+
+	conf := raft.ClusterConfig{Voters: []raft.NodeID{"a", "b", "c", "d", "e"}}
+	resp := nd.Step(raft.Message{
+		Type:     raft.MsgInstallSnapshot,
+		From:     "leader",
+		To:       "f",
+		Term:     7,
+		Snapshot: &raft.Snapshot{Index: 30, Term: 6, Data: []byte("snap"), Conf: conf},
+	})
+	if resp.Type != raft.MsgInstallSnapshotResp {
+		t.Fatalf("resp type = %v, want MsgInstallSnapshotResp", resp.Type)
+	}
+	want := []raft.NodeID{"a", "b", "c", "d", "e"}
+	if got := nd.Members(); !sameIDs(got, want) {
+		t.Fatalf("Members() after InstallSnapshot = %v, want %v", got, want)
+	}
+}
