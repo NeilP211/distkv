@@ -95,6 +95,9 @@ func (n *Network) Heal() {
 // SetDrop sets the probability that any given message is randomly dropped.
 // rate must be in [0, 1].  A rate of 1.0 drops every message.
 func (n *Network) SetDrop(rate float64) {
+	if rate < 0 || rate > 1 {
+		panic("simnet: SetDrop rate must be in [0,1]")
+	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.dropRate = rate
@@ -104,6 +107,9 @@ func (n *Network) SetDrop(rate float64) {
 // from [min, max].  Both values are applied synchronously inside Send
 // (the goroutine calling Send sleeps for the chosen duration).
 func (n *Network) SetDelay(min, max time.Duration) {
+	if max < min {
+		panic("simnet: SetDelay max must be >= min")
+	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.minDelay = min

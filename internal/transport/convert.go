@@ -1,6 +1,8 @@
 package transport
 
 import (
+	"fmt"
+
 	"github.com/NeilP211/distkv/api"
 	"github.com/NeilP211/distkv/internal/raft"
 )
@@ -132,7 +134,7 @@ func msgTypeToProto(t raft.MsgType) api.MsgType {
 	case raft.MsgInstallSnapshotResp:
 		return api.MsgType_MSG_INSTALL_SNAPSHOT_RESP
 	default:
-		return api.MsgType_MSG_REQUEST_VOTE
+		panic(fmt.Sprintf("transport: unknown MsgType %d", t))
 	}
 }
 
@@ -151,7 +153,7 @@ func msgTypeFromProto(t api.MsgType) raft.MsgType {
 	case api.MsgType_MSG_INSTALL_SNAPSHOT_RESP:
 		return raft.MsgInstallSnapshotResp
 	default:
-		return raft.MsgRequestVote
+		panic(fmt.Sprintf("transport: unknown MsgType %d", t))
 	}
 }
 
@@ -164,7 +166,7 @@ func entryTypeToProto(t raft.EntryType) api.EntryType {
 	case raft.EntryNoop:
 		return api.EntryType_ENTRY_NOOP
 	default:
-		return api.EntryType_ENTRY_NORMAL
+		panic(fmt.Sprintf("transport: unknown EntryType %d", t))
 	}
 }
 
@@ -177,6 +179,6 @@ func entryTypeFromProto(t api.EntryType) raft.EntryType {
 	case api.EntryType_ENTRY_NOOP:
 		return raft.EntryNoop
 	default:
-		return raft.EntryNormal
+		panic(fmt.Sprintf("transport: unknown EntryType %d", t))
 	}
 }

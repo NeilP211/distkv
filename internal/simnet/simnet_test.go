@@ -60,15 +60,20 @@ func TestBasicDelivery(t *testing.T) {
 // singleton groups, Send returns ErrUnreachable.
 func TestPartitionBlocksDelivery(t *testing.T) {
 	t.Parallel()
-	n, tA, _ := makeNet(2)
+	n, tA, tB := makeNet(2)
 
 	// Put each node in its own group.
 	n.Partition([]raft.NodeID{nodeA}, []raft.NodeID{nodeB})
 
 	req := raft.Message{Type: raft.MsgRequestVote, From: nodeA, To: nodeB, Term: 1}
-	_, err := tA.Send(nodeB, req)
-	if !errors.Is(err, transport.ErrUnreachable) {
-		t.Fatalf("expected ErrUnreachable after partition, got: %v", err)
+	if _, err := tA.Send(nodeB, req); !errors.Is(err, transport.ErrUnreachable) {
+		t.Fatalf("expected ErrUnreachable after partition (A->B), got: %v", err)
+	}
+
+	// A partition blocks both directions.
+	rev := raft.Message{Type: raft.MsgRequestVote, From: nodeB, To: nodeA, Term: 1}
+	if _, err := tB.Send(nodeA, rev); !errors.Is(err, transport.ErrUnreachable) {
+		t.Fatalf("expected ErrUnreachable after partition (B->A), got: %v", err)
 	}
 }
 
@@ -127,13 +132,19 @@ func TestSetDropZeroRate(t *testing.T) {
 // reachable again after Recover.
 func TestCrashAndRecover(t *testing.T) {
 	t.Parallel()
-	n, tA, _ := makeNet(6)
+	n, tA, tB := makeNet(6)
 
 	n.Crash(nodeB)
 	req := raft.Message{Type: raft.MsgAppendEntries, From: nodeA, To: nodeB, Term: 1}
 	_, err := tA.Send(nodeB, req)
 	if !errors.Is(err, transport.ErrUnreachable) {
-		t.Fatalf("expected ErrUnreachable for crashed node, got: %v", err)
+		t.Fatalf("expected ErrUnreachable receiving at crashed node, got: %v", err)
+	}
+
+	// A crashed node also cannot originate sends.
+	rev := raft.Message{Type: raft.MsgAppendEntries, From: nodeB, To: nodeA, Term: 1}
+	if _, err := tB.Send(nodeA, rev); !errors.Is(err, transport.ErrUnreachable) {
+		t.Fatalf("expected ErrUnreachable sending from crashed node, got: %v", err)
 	}
 
 	n.Recover(nodeB)
