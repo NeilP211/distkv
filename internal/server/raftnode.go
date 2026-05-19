@@ -21,6 +21,12 @@ import (
 // by background replication (heartbeat acks).
 const applyPoll = 5 * time.Millisecond
 
+// maxPendingResults bounds the buffer of apply results awaiting a racing
+// Propose to claim them.  The buffer only needs to cover the brief window
+// between a Propose committing an entry and that same Propose registering its
+// waiter, so a small cap is ample; the lowest indices are evicted past it.
+const maxPendingResults = 64
+
 // RaftNodeConfig configures a RaftNode: the embedded raft.Config plus the
 // real-time tick duration that drives raft.Node.Tick.
 type RaftNodeConfig struct {
@@ -60,6 +66,15 @@ type RaftNode struct {
 	// result.  Guarded by mu.
 	waiters map[uint64]chan proposalResult
 
+	// pending buffers apply results for entries that were applied before
+	// their Propose call had a chance to register a waiter.  raft.Propose
+	// can commit an entry synchronously (and the apply loop can then drain
+	// it) in the window between node.Propose returning and Propose
+	// registering its waiter; without this buffer that result would be lost
+	// and Propose would block forever.  Guarded by mu; entries are removed
+	// once claimed by Propose or when the node stops.
+	pending map[uint64]proposalResult
+
 	// applied is the highest log index whose entry has been applied to the
 	// state machine.  Guarded by mu; read by LinearizableGet to know when a
 	// ReadIndex point has been reached.
@@ -85,6 +100,7 @@ func NewRaftNode(cfg RaftNodeConfig) (*RaftNode, error) {
 		tickInterval: cfg.TickInterval,
 		applyNow:     make(chan struct{}, 1),
 		waiters:      make(map[uint64]chan proposalResult),
+		pending:      make(map[uint64]proposalResult),
 	}, nil
 }
 
@@ -123,11 +139,15 @@ func (rn *RaftNode) Stop() {
 	}
 	rn.wg.Wait()
 
-	// Fail any still-blocked proposal waiters so callers unblock promptly.
+	// Fail any still-blocked proposal waiters so callers unblock promptly,
+	// and drop buffered results no Propose will ever claim.
 	rn.mu.Lock()
 	for idx, ch := range rn.waiters {
 		close(ch)
 		delete(rn.waiters, idx)
+	}
+	for idx := range rn.pending {
+		delete(rn.pending, idx)
 	}
 	rn.mu.Unlock()
 }
@@ -209,6 +229,24 @@ func (rn *RaftNode) applyEntry(e raft.LogEntry) {
 	ch, ok := rn.waiters[e.Index]
 	if ok {
 		delete(rn.waiters, e.Index)
+	} else {
+		// No waiter yet: either the local Propose that produced this entry
+		// has not finished registering, or this entry was replicated from
+		// another leader (no local Propose at all).  Buffer the result so a
+		// racing Propose can claim it, but cap the buffer and evict the
+		// lowest-index stale entries so a follower applying a long stream
+		// of replicated entries cannot leak memory.
+		rn.pending[e.Index] = res
+		for len(rn.pending) > maxPendingResults {
+			var oldest uint64
+			first := true
+			for idx := range rn.pending {
+				if first || idx < oldest {
+					oldest, first = idx, false
+				}
+			}
+			delete(rn.pending, oldest)
+		}
 	}
 	rn.mu.Unlock()
 
@@ -247,6 +285,15 @@ func (rn *RaftNode) Propose(ctx context.Context, cmd store.Command) (string, err
 		rn.mu.Unlock()
 		return "", errors.New("server: RaftNode stopped")
 	}
+	// The apply loop may already have applied this entry in the window
+	// between node.Propose returning and now (raft.Propose can commit
+	// synchronously).  If so the result is buffered in pending; claim it
+	// directly rather than registering a waiter that would never fire.
+	if res, ok := rn.pending[idx]; ok {
+		delete(rn.pending, idx)
+		rn.mu.Unlock()
+		return res.value, res.err
+	}
 	rn.waiters[idx] = ch
 	rn.mu.Unlock()
 
@@ -256,9 +303,11 @@ func (rn *RaftNode) Propose(ctx context.Context, cmd store.Command) (string, err
 	rn.signalApply()
 
 	defer func() {
-		// Clean up the waiter on every exit path.
+		// Clean up the waiter and any unclaimed buffered result on every
+		// exit path.
 		rn.mu.Lock()
 		delete(rn.waiters, idx)
+		delete(rn.pending, idx)
 		rn.mu.Unlock()
 	}()
 
