@@ -51,6 +51,60 @@ func TestProposeReplicatesAndCommits(t *testing.T) {
 	}
 }
 
+func TestSingleNodeProposeCommitsImmediately(t *testing.T) {
+	ct := &countingTransport{}
+	nd := newSingleNode(t, ct)
+
+	// Tick the solo node to leadership.
+	for i := 0; i < 5; i++ {
+		nd.Tick()
+	}
+	if nd.Role() != raft.Leader {
+		t.Fatalf("role = %v, want Leader", nd.Role())
+	}
+
+	// Drain the no-op entry committed on becoming leader so Ready below
+	// reports only the proposed entry.
+	beforeCommit := nd.CommitIndex()
+	_ = nd.Ready()
+
+	idx, err := nd.Propose([]byte("solo-value"))
+	if err != nil {
+		t.Fatalf("Propose: %v", err)
+	}
+
+	// The leader alone is a majority, so the entry commits immediately —
+	// without any transport activity.
+	if got := nd.CommitIndex(); got < idx {
+		t.Fatalf("commitIndex = %d after Propose at idx %d, want >= %d", got, idx, idx)
+	}
+	if got := nd.CommitIndex(); got <= beforeCommit {
+		t.Fatalf("commitIndex did not advance past %d (got %d)", beforeCommit, got)
+	}
+
+	// Ready must yield the proposed entry exactly once.
+	ready := nd.Ready()
+	found := 0
+	for _, e := range ready {
+		if e.Index == idx {
+			if e.Type != raft.EntryNormal || !bytes.Equal(e.Data, []byte("solo-value")) {
+				t.Fatalf("Ready entry@%d = %+v, want EntryNormal solo-value", idx, e)
+			}
+			found++
+		}
+	}
+	if found != 1 {
+		t.Fatalf("Ready yielded proposed entry %d times, want 1", found)
+	}
+	if extra := nd.Ready(); len(extra) != 0 {
+		t.Fatalf("second Ready returned %d entries, want 0", len(extra))
+	}
+
+	if ct.sends != 0 {
+		t.Fatalf("transport Send count = %d, want 0 (single-node needs no transport)", ct.sends)
+	}
+}
+
 func TestProposeOnNonLeaderFails(t *testing.T) {
 	c := newCluster(t, 3, 5)
 	leader := c.waitOneLeader(200)

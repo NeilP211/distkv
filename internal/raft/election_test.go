@@ -114,6 +114,60 @@ func (c *cluster) waitOneLeader(maxTicks int) raft.NodeID {
 	return ""
 }
 
+// countingTransport records every Send call so tests can assert that a
+// single-node cluster never touches the transport.
+type countingTransport struct{ sends int }
+
+func (ct *countingTransport) Send(to raft.NodeID, msg raft.Message) (raft.Message, error) {
+	ct.sends++
+	return raft.Message{}, nil
+}
+
+// newSingleNode builds a one-member raft.Node ("solo") with the given
+// transport.  The cluster's only member is the node itself.
+func newSingleNode(t *testing.T, tr raft.Transport) *raft.Node {
+	t.Helper()
+	cfg := raft.Config{
+		ID:                 "solo",
+		Peers:              []raft.NodeID{"solo"},
+		Storage:            raft.NewMemStorage(),
+		Transport:          tr,
+		ElectionTimeoutMin: 5,
+		ElectionTimeoutMax: 5,
+		HeartbeatInterval:  3,
+	}
+	nd, err := raft.NewNode(cfg)
+	if err != nil {
+		t.Fatalf("NewNode(solo): %v", err)
+	}
+	return nd
+}
+
+func TestSingleNodeSelfElects(t *testing.T) {
+	ct := &countingTransport{}
+	nd := newSingleNode(t, ct)
+
+	if nd.Role() != raft.Follower {
+		t.Fatalf("initial role = %v, want Follower", nd.Role())
+	}
+
+	// Drive only by Tick(); the node must become Leader once the election
+	// timeout (5 ticks) elapses, with no peer responses.
+	for i := 0; i < 5; i++ {
+		nd.Tick()
+	}
+
+	if nd.Role() != raft.Leader {
+		t.Fatalf("role after election timeout = %v, want Leader", nd.Role())
+	}
+	if nd.Leader() != "solo" {
+		t.Fatalf("Leader() = %q, want \"solo\"", nd.Leader())
+	}
+	if ct.sends != 0 {
+		t.Fatalf("transport Send count = %d, want 0 (single-node needs no transport)", ct.sends)
+	}
+}
+
 func TestElectionThreeNodesOneLeader(t *testing.T) {
 	c := newCluster(t, 3, 1)
 	leader := c.waitOneLeader(200)

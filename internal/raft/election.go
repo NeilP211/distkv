@@ -21,7 +21,14 @@ func (n *Node) Tick() {
 		n.electionElapsed++
 		if n.electionElapsed >= n.electionTimeout {
 			n.becomeCandidate()
-			out = n.buildRequestVotes()
+			// becomeCandidate may have already won the election in a
+			// single-node cluster; in that case assert leadership with
+			// heartbeats instead of soliciting votes.
+			if n.role == Leader {
+				out = n.buildAppendEntries()
+			} else {
+				out = n.buildRequestVotes()
+			}
 		}
 	case Leader:
 		n.heartbeatElapsed++
@@ -146,8 +153,7 @@ func (n *Node) handleRequestVoteResp(msg Message) []outMsg {
 		return nil
 	}
 	n.votesGranted[msg.From] = true
-	if len(n.votesGranted) >= n.quorum() {
-		n.becomeLeader()
+	if n.maybeBecomeLeader() {
 		// Immediately assert leadership with a round of heartbeats so
 		// followers learn the new leader without waiting a full tick.
 		return n.buildAppendEntries()

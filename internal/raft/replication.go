@@ -17,6 +17,11 @@ func (n *Node) Propose(data []byte) (uint64, error) {
 	n.log.append([]LogEntry{{Term: n.currentTerm, Type: EntryNormal, Data: data}})
 	idx := n.log.lastIndex()
 	n.matchIndex[n.id] = idx
+	// In a single-node cluster the leader alone is a majority, so the entry
+	// is committed the instant it is appended.  advanceCommit counts the
+	// leader's own matchIndex and still enforces the §5.4.2 current-term
+	// rule, so it is a no-op for a multi-node leader that lacks peer acks.
+	n.advanceCommit()
 	out := n.buildAppendEntries()
 	n.mu.Unlock()
 

@@ -138,54 +138,11 @@ func (rn *RaftNode) tickLoop(ctx context.Context) {
 			return
 		case <-t.C:
 			rn.node.Tick()
-			rn.driveSingleNode()
-			// A Tick may have advanced commitIndex (heartbeat acks);
-			// nudge the apply loop so it drains promptly.
+			// A Tick may have advanced commitIndex (heartbeat acks, or a
+			// single-node leader self-committing); nudge the apply loop so
+			// it drains promptly.
 			rn.signalApply()
 		}
-	}
-}
-
-// driveSingleNode advances a one-member cluster that the Raft core cannot
-// progress on its own.  The core only transitions a candidate to leader, and
-// only advances the commit index, in response to a peer *response* message;
-// with no peers, none is ever sent.  A one-member cluster trivially holds a
-// majority by itself, so we feed synthetic self-addressed responses through
-// the public Step API — no raft-core change required:
-//
-//   - A candidate receives a self vote-response and becomes leader.
-//   - A leader receives a self AppendEntries-response so advanceCommit runs
-//     and committed-on-itself entries become committed.
-//
-// Both messages are idempotent and this is a complete no-op for multi-node
-// clusters, which the Raft core drives correctly via real peer traffic.
-func (rn *RaftNode) driveSingleNode() {
-	if len(rn.members) != 1 {
-		return
-	}
-	id := rn.node.ID()
-	switch rn.node.Role() {
-	case raft.Candidate:
-		rn.node.Step(raft.Message{
-			Type:        raft.MsgRequestVoteResp,
-			From:        id,
-			To:          id,
-			Term:        rn.node.Term(),
-			VoteGranted: true,
-		})
-	case raft.Leader:
-		// ConflictIndex carries the highest replicated index on success;
-		// for a single node that is simply the commit-eligible last index,
-		// but the core re-derives commit from matchIndex which Propose has
-		// already set, so any in-term value triggers advanceCommit.
-		rn.node.Step(raft.Message{
-			Type:          raft.MsgAppendEntriesResp,
-			From:          id,
-			To:            id,
-			Term:          rn.node.Term(),
-			Success:       true,
-			ConflictIndex: rn.node.CommitIndex(),
-		})
 	}
 }
 
@@ -275,11 +232,9 @@ func (rn *RaftNode) Propose(ctx context.Context, cmd store.Command) (string, err
 	rn.waiters[idx] = ch
 	rn.mu.Unlock()
 
-	// For a one-member cluster, commit advancement needs a synthetic
-	// self-response; the next tick would do this but driving it now keeps
-	// proposal latency low.  No-op for multi-node clusters.
-	rn.driveSingleNode()
-	// The entry may already be committed; nudge the apply loop.
+	// raft.Propose may already have committed the entry (a single-node
+	// leader is its own majority); nudge the apply loop so it drains
+	// without waiting for the next applyPoll tick.
 	rn.signalApply()
 
 	defer func() {

@@ -200,6 +200,10 @@ func (n *Node) becomeFollower(term uint64, leader NodeID) {
 
 // becomeCandidate transitions to Candidate: it increments the term, votes for
 // itself, and resets the election timer.  Caller must hold mu.
+//
+// In a single-node cluster the self-vote alone constitutes a majority, so the
+// node must promote itself to Leader within this same call path rather than
+// waiting for a peer vote response that will never arrive.
 func (n *Node) becomeCandidate() {
 	n.role = Candidate
 	n.currentTerm++
@@ -208,6 +212,25 @@ func (n *Node) becomeCandidate() {
 	n.votesGranted = map[NodeID]bool{n.id: true}
 	n.resetElectionTimeout()
 	n.persistHardState()
+	// The self-vote may already be a majority (cluster size 1).
+	n.maybeBecomeLeader()
+}
+
+// maybeBecomeLeader promotes the node to Leader if it is still a Candidate and
+// the votes granted so far constitute a majority of the cluster.  It is the
+// single place the vote-majority check lives; both becomeCandidate (covering
+// single-node clusters) and handleRequestVoteResp (covering multi-node
+// clusters) call it.  It returns true iff the promotion happened.  Caller must
+// hold mu.
+func (n *Node) maybeBecomeLeader() bool {
+	if n.role != Candidate {
+		return false
+	}
+	if len(n.votesGranted) < n.quorum() {
+		return false
+	}
+	n.becomeLeader()
+	return true
 }
 
 // becomeLeader transitions to Leader: it initializes per-peer replication
