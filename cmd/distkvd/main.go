@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -17,9 +18,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"google.golang.org/grpc"
 
 	"github.com/NeilP211/distkv/api"
+	"github.com/NeilP211/distkv/internal/metrics"
 	"github.com/NeilP211/distkv/internal/raft"
 	"github.com/NeilP211/distkv/internal/raftstore"
 	"github.com/NeilP211/distkv/internal/server"
@@ -34,10 +37,11 @@ func main() {
 
 func run() error {
 	var (
-		idFlag    = flag.String("id", "", "this node's id (required)")
-		listen    = flag.String("listen", "", "host:port for this node's gRPC server (required)")
-		peersFlag = flag.String("peers", "", "comma-separated id=host:port for ALL members, including self (required)")
-		dataDir   = flag.String("data-dir", "", "directory for this node's bbolt storage (required)")
+		idFlag        = flag.String("id", "", "this node's id (required)")
+		listen        = flag.String("listen", "", "host:port for this node's gRPC server (required)")
+		peersFlag     = flag.String("peers", "", "comma-separated id=host:port for ALL members, including self (required)")
+		dataDir       = flag.String("data-dir", "", "directory for this node's bbolt storage (required)")
+		metricsListen = flag.String("metrics-listen", "127.0.0.1:9101", "host:port for the Prometheus /metrics HTTP server")
 	)
 	flag.Parse()
 
@@ -100,6 +104,21 @@ func run() error {
 	api.RegisterRaftServiceServer(gs, transport.NewRaftServer(rn.Step))
 	api.RegisterKVServer(gs, server.NewKVService(rn, peers))
 
+	// Ensure the metrics package collectors are registered (promauto does this
+	// on init, but calling MustRegister makes the dependency explicit).
+	metrics.MustRegister()
+
+	// Start the Prometheus /metrics HTTP server on a dedicated port.
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("/metrics", promhttp.Handler())
+	metricsServer := &http.Server{Addr: *metricsListen, Handler: metricsMux}
+	go func() {
+		log.Printf("distkvd: metrics server listening on %s", *metricsListen)
+		if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("distkvd: metrics server error: %v", err)
+		}
+	}()
+
 	rn.Start()
 	log.Printf("distkvd: node %s listening on %s, peers=%v", id, *listen, peers)
 
@@ -107,7 +126,7 @@ func run() error {
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- gs.Serve(ln) }()
 
-	// Log role changes at a low cadence for operator visibility.
+	// Log role changes and update Prometheus metrics at a low cadence.
 	roleStop := make(chan struct{})
 	go watchRole(rn, roleStop)
 
@@ -128,6 +147,7 @@ func run() error {
 	close(roleStop)
 	gs.GracefulStop()
 	rn.Stop()
+	_ = metricsServer.Close()
 	log.Printf("distkvd: node %s stopped", id)
 	return nil
 }
@@ -152,21 +172,40 @@ func parsePeers(s string) (map[raft.NodeID]string, error) {
 	return peers, nil
 }
 
-// watchRole logs whenever the node's Raft role changes, until stop is closed.
+// watchRole logs role changes and keeps Prometheus metrics in sync with the
+// node's current Raft state.  It runs until stop is closed.
 func watchRole(rn *server.RaftNode, stop <-chan struct{}) {
 	t := time.NewTicker(200 * time.Millisecond)
 	defer t.Stop()
-	last := ""
+	lastRole := ""
+	lastTerm := uint64(0)
 	for {
 		select {
 		case <-stop:
 			return
 		case <-t.C:
 			st := rn.Status()
-			if st.Role != last {
+
+			// Update Prometheus role/term gauges on every tick.
+			metrics.SetRole(st.Role)
+			metrics.SetTerm(st.Term)
+
+			// Replication lag: Status does not expose matchIndex, so we
+			// leave lag at 0.  A future accessor on RaftNode could populate
+			// this without modifying the Raft core.
+			metrics.SetReplicationLag(0)
+
+			// Log role/term changes and count leader elections.
+			if st.Role != lastRole {
 				log.Printf("distkvd: node %s role=%s term=%d leader=%s",
 					st.ID, st.Role, st.Term, st.Leader)
-				last = st.Role
+				if st.Role == "Leader" {
+					metrics.LeaderElected(string(st.ID))
+				}
+				lastRole = st.Role
+			}
+			if st.Term != lastTerm {
+				lastTerm = st.Term
 			}
 		}
 	}

@@ -8,6 +8,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/NeilP211/distkv/api"
+	"github.com/NeilP211/distkv/internal/metrics"
 	"github.com/NeilP211/distkv/internal/raft"
 	"github.com/NeilP211/distkv/internal/store"
 )
@@ -65,11 +66,14 @@ func (s *KVService) Put(ctx context.Context, req *api.PutReq) (*api.PutResp, err
 		Value: string(req.GetValue()),
 	})
 	if errors.Is(err, raft.ErrNotLeader) {
+		metrics.KVRequest("put", "notleader")
 		return &api.PutResp{Success: false, LeaderHint: s.leaderHint()}, nil
 	}
 	if err != nil {
+		metrics.KVRequest("put", "error")
 		return nil, status.Errorf(codes.Internal, "put failed: %v", err)
 	}
+	metrics.KVRequest("put", "ok")
 	return &api.PutResp{Success: true}, nil
 }
 
@@ -80,11 +84,14 @@ func (s *KVService) Delete(ctx context.Context, req *api.DeleteReq) (*api.Delete
 		Key: req.GetKey(),
 	})
 	if errors.Is(err, raft.ErrNotLeader) {
+		metrics.KVRequest("delete", "notleader")
 		return &api.DeleteResp{Success: false, LeaderHint: s.leaderHint()}, nil
 	}
 	if err != nil {
+		metrics.KVRequest("delete", "error")
 		return nil, status.Errorf(codes.Internal, "delete failed: %v", err)
 	}
+	metrics.KVRequest("delete", "ok")
 	return &api.DeleteResp{Success: true}, nil
 }
 
@@ -99,16 +106,20 @@ func (s *KVService) CAS(ctx context.Context, req *api.CASReq) (*api.CASResp, err
 		ExpectValue: string(req.GetExpectValue()),
 	})
 	if errors.Is(err, raft.ErrNotLeader) {
+		metrics.KVRequest("cas", "notleader")
 		return &api.CASResp{Success: false, LeaderHint: s.leaderHint()}, nil
 	}
 	if errors.Is(err, store.ErrCASMismatch) {
 		// Expected value did not match: a normal failed CAS, not a routing
 		// error and not an RPC fault.
+		metrics.KVRequest("cas", "error")
 		return &api.CASResp{Success: false}, nil
 	}
 	if err != nil {
+		metrics.KVRequest("cas", "error")
 		return nil, status.Errorf(codes.Internal, "cas failed: %v", err)
 	}
+	metrics.KVRequest("cas", "ok")
 	return &api.CASResp{Success: true}, nil
 }
 
@@ -125,14 +136,18 @@ func (s *KVService) Get(ctx context.Context, req *api.GetReq) (*api.GetResp, err
 	v, found, err := s.node.LinearizableGet(ctx, req.GetKey())
 	if errors.Is(err, raft.ErrNotLeader) {
 		// Not the leader: refuse to serve a possibly-stale read.
+		metrics.KVRequest("get", "notleader")
 		return &api.GetResp{Found: false}, nil
 	}
 	if errors.Is(err, ErrLeadershipLost) {
+		metrics.KVRequest("get", "unavailable")
 		return nil, status.Error(codes.Unavailable, "leadership lost during read")
 	}
 	if err != nil {
+		metrics.KVRequest("get", "error")
 		return nil, status.Errorf(codes.Internal, "get failed: %v", err)
 	}
+	metrics.KVRequest("get", "ok")
 	return &api.GetResp{Value: []byte(v), Found: found}, nil
 }
 
@@ -143,6 +158,7 @@ func (s *KVService) Status(_ context.Context, _ *api.StatusReq) (*api.StatusResp
 	for i, m := range st.Members {
 		members[i] = string(m)
 	}
+	metrics.KVRequest("status", "ok")
 	return &api.StatusResp{
 		LeaderId:    string(st.Leader),
 		Term:        st.Term,
