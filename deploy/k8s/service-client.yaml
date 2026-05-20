@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: distkv-client
+  labels:
+    app.kubernetes.io/name: distkv
+    app.kubernetes.io/component: client
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: distkv
+  ports:
+    - name: grpc
+      port: 9001
+      targetPort: grpc
+      protocol: TCP

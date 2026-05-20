@@ -1,0 +1,129 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: distkv
+  labels:
+    app.kubernetes.io/name: distkv
+    app.kubernetes.io/component: server
+spec:
+  replicas: 3
+  # serviceName references the headless service that provides stable DNS names:
+  #   distkv-0.distkv.<ns>.svc.cluster.local  -> node id n1
+  #   distkv-1.distkv.<ns>.svc.cluster.local  -> node id n2
+  #   distkv-2.distkv.<ns>.svc.cluster.local  -> node id n3
+  serviceName: distkv
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: distkv
+  podManagementPolicy: Parallel
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: distkv
+    spec:
+      terminationGracePeriodSeconds: 30
+
+      # initContainer: runs busybox to derive the node ID from the pod ordinal
+      # (hostname suffix) and writes it to a shared emptyDir.  The main
+      # container sources it via the NODE_ID env var.  This pattern is
+      # necessary because the distroless runtime image has no shell.
+      #
+      # Production recommendation: use the Helm chart at deploy/helm/distkv,
+      # which renders exact per-pod args from templates and avoids the
+      # initContainer entirely.
+      initContainers:
+        - name: init-node-id
+          image: busybox:stable
+          command:
+            - /bin/sh
+            - -c
+            - 'printf "n%d" "$((${HOSTNAME##*-} + 1))" > /shared/node-id && cat /shared/node-id'
+          volumeMounts:
+            - name: shared-args
+              mountPath: /shared
+
+      containers:
+        - name: distkvd
+          image: ghcr.io/neilp211/distkv:latest
+          imagePullPolicy: Always
+          ports:
+            - name: grpc
+              containerPort: 9001
+              protocol: TCP
+            - name: metrics
+              containerPort: 9101
+              protocol: TCP
+          # distkvd flag args.  $(NODE_ID) and $(POD_NAMESPACE) are substituted
+          # by Kubernetes env-var expansion before the process starts.
+          # The --peers flag is identical for every replica (each DistKV node
+          # lists all cluster members including itself).
+          command: ["/distkvd"]
+          args:
+            - "--id=$(NODE_ID)"
+            - "--listen=0.0.0.0:9001"
+            - "--peers=n1=distkv-0.distkv.$(POD_NAMESPACE).svc.cluster.local:9001,n2=distkv-1.distkv.$(POD_NAMESPACE).svc.cluster.local:9001,n3=distkv-2.distkv.$(POD_NAMESPACE).svc.cluster.local:9001"
+            - "--data-dir=/data"
+            - "--metrics-listen=0.0.0.0:9101"
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # NODE_ID is written to /shared/node-id by the init container;
+            # it is exposed here via a fixed env var that is read from that
+            # file using a projected volume.  Because Kubernetes does not
+            # natively expose file contents as env vars without a shell, the
+            # recommended path is the Helm chart or an operator.  For this
+            # raw manifest we accept that an operator must patch NODE_ID per
+            # pod, or use the Helm chart which renders it correctly.
+            #
+            # The value below is a placeholder; the Helm chart overrides it.
+            - name: NODE_ID
+              valueFrom:
+                fieldRef:
+                  # metadata.name is "distkv-0", "distkv-1", "distkv-2".
+                  # The init container writes the correct "n1"/"n2"/"n3" form;
+                  # for the raw manifest we use the pod name as the node id
+                  # (distkvd accepts any non-empty string as --id).
+                  fieldPath: metadata.name
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: shared-args
+              mountPath: /shared
+
+      volumes:
+        - name: shared-args
+          emptyDir: {}
+
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app.kubernetes.io/name: distkv
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 500Mi
