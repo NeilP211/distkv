@@ -1,0 +1,114 @@
+version: "3.9"
+
+# ---------------------------------------------------------------------------
+# 3-node DistKV cluster + Prometheus + Grafana
+#
+# Usage:
+#   docker compose up --build
+#
+# KV endpoint: distkv-n1:9001 (from within the network) or
+#              localhost:9001  (via the published port below).
+# Metrics:     distkv-n1:9101, distkv-n2:9102, distkv-n3:9103
+# Prometheus:  http://localhost:9090
+# Grafana:     http://localhost:3000  (admin / admin)
+# ---------------------------------------------------------------------------
+
+networks:
+  distkv:
+    driver: bridge
+
+volumes:
+  distkv-n1-data:
+  distkv-n2-data:
+  distkv-n3-data:
+  prometheus-data:
+  grafana-data:
+
+services:
+  # ---------- DistKV nodes --------------------------------------------------
+
+  distkv-n1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    networks: [distkv]
+    ports:
+      - "9001:9001"   # gRPC / KV service
+      - "9101:9101"   # Prometheus metrics
+    volumes:
+      - distkv-n1-data:/data
+    command:
+      - --id=n1
+      - --listen=0.0.0.0:9001
+      - --peers=n1=distkv-n1:9001,n2=distkv-n2:9001,n3=distkv-n3:9001
+      - --data-dir=/data
+      - --metrics-listen=0.0.0.0:9101
+    restart: unless-stopped
+
+  distkv-n2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    networks: [distkv]
+    ports:
+      - "9002:9001"
+      - "9102:9102"
+    volumes:
+      - distkv-n2-data:/data
+    command:
+      - --id=n2
+      - --listen=0.0.0.0:9001
+      - --peers=n1=distkv-n1:9001,n2=distkv-n2:9001,n3=distkv-n3:9001
+      - --data-dir=/data
+      - --metrics-listen=0.0.0.0:9102
+    restart: unless-stopped
+
+  distkv-n3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    networks: [distkv]
+    ports:
+      - "9003:9001"
+      - "9103:9103"
+    volumes:
+      - distkv-n3-data:/data
+    command:
+      - --id=n3
+      - --listen=0.0.0.0:9001
+      - --peers=n1=distkv-n1:9001,n2=distkv-n2:9001,n3=distkv-n3:9001
+      - --data-dir=/data
+      - --metrics-listen=0.0.0.0:9103
+    restart: unless-stopped
+
+  # ---------- Prometheus ----------------------------------------------------
+
+  prometheus:
+    image: prom/prometheus:latest
+    networks: [distkv]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    restart: unless-stopped
+
+  # ---------- Grafana -------------------------------------------------------
+
+  grafana:
+    image: grafana/grafana:latest
+    networks: [distkv]
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/distkv-dashboard.json:/etc/grafana/dashboards/distkv-dashboard.json:ro
+    restart: unless-stopped
