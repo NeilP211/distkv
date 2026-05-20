@@ -1,0 +1,17 @@
+apiVersion: v2
+name: distkv
+description: A Helm chart for deploying a DistKV Raft-based distributed key-value cluster.
+type: application
+version: 0.1.0
+appVersion: "latest"
+keywords:
+  - distkv
+  - raft
+  - distributed
+  - kv
+home: https://github.com/NeilP211/distkv
+sources:
+  - https://github.com/NeilP211/distkv
+maintainers:
+  - name: NeilP211
+    email: neilpatel1623@gmail.com

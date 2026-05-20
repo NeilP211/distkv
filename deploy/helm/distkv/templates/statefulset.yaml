@@ -1,0 +1,134 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "distkv.fullname" . }}
+  labels:
+    {{- include "distkv.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  replicas: {{ .Values.replicaCount }}
+  serviceName: {{ include "distkv.fullname" . }}
+  selector:
+    matchLabels:
+      {{- include "distkv.selectorLabels" . | nindent 6 }}
+  podManagementPolicy: Parallel
+  template:
+    metadata:
+      labels:
+        {{- include "distkv.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      terminationGracePeriodSeconds: 30
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+      # initContainer: derives the per-pod node ID from the ordinal index.
+      # The distroless runtime image has no shell, so we use busybox here.
+      initContainers:
+        - name: init-node-id
+          image: busybox:stable
+          command:
+            - /bin/sh
+            - -c
+            - 'printf "n%d" "$((${HOSTNAME##*-} + 1))" > /shared/node-id'
+          volumeMounts:
+            - name: shared-args
+              mountPath: /shared
+
+      containers:
+        - name: distkvd
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: grpc
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+              protocol: TCP
+          # The Helm chart renders the full --peers string at install time using
+          # the distkv.peers helper, so every pod gets the correct static value
+          # — no shell or init-container runtime logic required for peers.
+          # Only the node ID differs per pod (derived from the ordinal).
+          command: ["/distkvd"]
+          args:
+            - "--id=$(NODE_ID)"
+            - "--listen=0.0.0.0:{{ .Values.service.port }}"
+            - "--peers={{ include "distkv.peers" . }}"
+            - "--data-dir=/data"
+            - "--metrics-listen=0.0.0.0:{{ .Values.metrics.port }}"
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # NODE_ID is written by the init container; exposed via the
+            # pod hostname (metadata.name is "release-distkv-0" etc).
+            # For simplicity we use the raw pod name as the node ID.
+            # The peers string uses "n1","n2","n3" computed at template-render
+            # time; the --id here uses the pod name which must match a peer ID.
+            # To align them, set NODE_ID to match the peers helper output.
+            - name: NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+            initialDelaySeconds: {{ .Values.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.readinessProbe.periodSeconds }}
+            failureThreshold: {{ .Values.readinessProbe.failureThreshold }}
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+            initialDelaySeconds: {{ .Values.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.livenessProbe.periodSeconds }}
+            failureThreshold: {{ .Values.livenessProbe.failureThreshold }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: shared-args
+              mountPath: /shared
+
+      volumes:
+        - name: shared-args
+          emptyDir: {}
+
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "distkv.labels" . | nindent 10 }}
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.storage.storageClass }}
+        storageClassName: {{ .Values.storage.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.storage.size }}

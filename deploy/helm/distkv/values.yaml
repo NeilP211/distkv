@@ -1,0 +1,61 @@
+# Default values for distkv.
+# Override with: helm install distkv deploy/helm/distkv -f myvalues.yaml
+
+# Number of DistKV nodes in the cluster.  Must be an odd number >= 1.
+replicaCount: 3
+
+image:
+  repository: ghcr.io/neilp211/distkv
+  tag: latest
+  pullPolicy: Always
+
+# imagePullSecrets:
+#   - name: regcred
+
+nameOverride: ""
+fullnameOverride: ""
+
+service:
+  # Client-facing service type.
+  type: ClusterIP
+  port: 9001
+
+metrics:
+  # Port the Prometheus /metrics HTTP server listens on inside the container.
+  port: 9101
+
+storage:
+  # Size of the persistent volume claim for each node's data directory.
+  size: 500Mi
+  storageClass: ""
+
+resources:
+  requests:
+    cpu: "100m"
+    memory: "128Mi"
+  limits:
+    cpu: "500m"
+    memory: "512Mi"
+
+# Readiness probe settings.
+readinessProbe:
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  failureThreshold: 3
+
+# Liveness probe settings.
+livenessProbe:
+  initialDelaySeconds: 15
+  periodSeconds: 20
+  failureThreshold: 5
+
+# Extra environment variables to set on each pod.
+extraEnv: []
+
+# Pod annotations.
+podAnnotations: {}
+
+# Node selector, tolerations, affinity — standard Kubernetes overrides.
+nodeSelector: {}
+tolerations: []
+affinity: {}
