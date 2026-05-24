@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DistKV — live Raft console</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="scanlines" aria-hidden="true"></div>
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">◢◤</span> DistKV <span class="sub">// live raft console</span>
+    </div>
+    <div class="status" id="clusterSummary">connecting…</div>
+    <div class="speed">
+      <span class="lbl">speed</span>
+      <button class="spd" data-speed="slow">slow</button>
+      <button class="spd active" data-speed="normal">normal</button>
+      <button class="spd" data-speed="fast">fast</button>
+      <button class="reset" id="resetBtn">reset</button>
+    </div>
+  </header>
+
+  <main class="grid">
+    <section class="panel nodes">
+      <h2>nodes</h2>
+      <ul id="nodeList"></ul>
+    </section>
+
+    <section class="panel topo">
+      <h2>cluster <span class="hint">rpc dots: <i class="k vote">vote</i> <i class="k append">append</i> <i class="k resp">ack</i> <i class="k snap">snapshot</i></span></h2>
+      <canvas id="topo"></canvas>
+    </section>
+
+    <section class="panel controls">
+      <h2>controls</h2>
+
+      <div class="ctl-group">
+        <h3>faults</h3>
+        <div id="faultBtns" class="fault-btns"></div>
+        <div class="row">
+          <label>drop rate <output id="dropOut">0%</output></label>
+          <input type="range" id="dropRange" min="0" max="100" value="0" />
+        </div>
+        <div class="row partition">
+          <span class="lbl">partition</span>
+          <div id="partBuilder" class="part-builder"></div>
+          <div class="part-actions">
+            <button id="partApply">apply split</button>
+            <button id="partHeal">heal</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="ctl-group">
+        <h3>key / value</h3>
+        <div class="kv">
+          <input id="kvKey" placeholder="key" />
+          <input id="kvVal" placeholder="value" />
+        </div>
+        <div class="kv-btns">
+          <button data-op="put">put</button>
+          <button data-op="get">get</button>
+          <button data-op="del">del</button>
+        </div>
+        <div class="kv-result" id="kvResult">—</div>
+      </div>
+    </section>
+
+    <section class="panel events">
+      <h2>event log</h2>
+      <ul id="eventLog"></ul>
+    </section>
+
+    <section class="panel logview">
+      <h2>raft log <span class="hint">green = committed</span></h2>
+      <div id="logView" class="logcols"></div>
+    </section>
+  </main>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
