@@ -40,6 +40,22 @@ type Network struct {
 	// delay configuration (zero means no delay).
 	minDelay time.Duration
 	maxDelay time.Duration
+
+	// observer, when non-nil, is invoked once per attempted send for
+	// observability (the web showcase taps it to animate RPCs). It never
+	// consumes the RNG and is called without the lock held, so it cannot
+	// affect routing decisions or determinism.
+	observer func(MessageEvent)
+}
+
+// MessageEvent describes one attempted send, delivered to a registered
+// observer. Dropped is true when the message did not reach its handler for any
+// reason (a down/isolated/crashed endpoint, an active partition, the random
+// drop rate, or no registered handler).
+type MessageEvent struct {
+	From, To raft.NodeID
+	Type     raft.MsgType
+	Dropped  bool
 }
 
 // NewNetwork creates a new Network whose random-number generator is seeded
@@ -116,6 +132,17 @@ func (n *Network) SetDelay(min, max time.Duration) {
 	n.maxDelay = max
 }
 
+// SetObserver installs fn as the network's send observer, or clears it when fn
+// is nil. fn is invoked once per attempted send with a MessageEvent describing
+// the source, destination, message type, and whether the message was dropped.
+// It runs without the network lock held and off the RNG path, so it cannot
+// change routing outcomes or break the seeded determinism of fault injection.
+func (n *Network) SetObserver(fn func(MessageEvent)) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.observer = fn
+}
+
 // Isolate marks id as isolated: it cannot send to or receive from any peer.
 // Use Recover to restore connectivity.
 func (n *Network) Isolate(id raft.NodeID) {
@@ -146,40 +173,43 @@ func (n *Network) Recover(id raft.NodeID) {
 func (n *Network) send(from raft.NodeID, to raft.NodeID, msg raft.Message) (raft.Message, error) {
 	n.mu.Lock()
 
-	// Check if source or destination is down.
-	if n.down[from] || n.down[to] {
-		n.mu.Unlock()
-		return raft.Message{}, transport.ErrUnreachable
+	// A down/isolated/crashed endpoint or an active partition makes the send
+	// unreachable. This check precedes any RNG use, exactly as before, so an
+	// unreachable send never advances the RNG and determinism is preserved.
+	unreachable := n.down[from] || n.down[to] ||
+		(n.partition != nil && !n.sameGroup(from, to))
+
+	var (
+		dropped bool
+		delay   time.Duration
+		handler func(raft.Message) raft.Message
+		ok      bool
+	)
+	if !unreachable {
+		// Check drop rate.
+		dropped = n.dropRate > 0 && n.rng.Float64() < n.dropRate
+
+		// Sample delay.
+		if n.maxDelay > n.minDelay {
+			delay = n.minDelay + time.Duration(n.rng.Int63n(int64(n.maxDelay-n.minDelay)))
+		} else if n.maxDelay > 0 {
+			delay = n.minDelay
+		}
+
+		// Retrieve the destination handler.
+		handler, ok = n.handlers[to]
 	}
 
-	// Check partition.
-	if n.partition != nil && !n.sameGroup(from, to) {
-		n.mu.Unlock()
-		return raft.Message{}, transport.ErrUnreachable
-	}
-
-	// Check drop rate.
-	dropped := n.dropRate > 0 && n.rng.Float64() < n.dropRate
-
-	// Sample delay.
-	var delay time.Duration
-	if n.maxDelay > n.minDelay {
-		delay = n.minDelay + time.Duration(n.rng.Int63n(int64(n.maxDelay-n.minDelay)))
-	} else if n.maxDelay > 0 {
-		delay = n.minDelay
-	}
-
-	// Retrieve the destination handler.
-	handler, ok := n.handlers[to]
-
+	obs := n.observer
 	n.mu.Unlock()
 
-	if dropped {
-		return raft.Message{}, transport.ErrUnreachable
+	delivered := !unreachable && !dropped && ok
+
+	if obs != nil {
+		obs(MessageEvent{From: from, To: to, Type: msg.Type, Dropped: !delivered})
 	}
 
-	if !ok {
-		// No handler registered — treat as unreachable.
+	if !delivered {
 		return raft.Message{}, transport.ErrUnreachable
 	}
 

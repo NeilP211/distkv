@@ -2,6 +2,7 @@ package simnet_test
 
 import (
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -36,6 +37,69 @@ func makeNet(seed int64) (*simnet.Network, transport.Transport, transport.Transp
 	tA := n.Node(nodeA)
 	tB := n.Node(nodeB)
 	return n, tA, tB
+}
+
+// TestObserverReportsOutcomes verifies that a registered observer is invoked
+// once per send with the correct from/to/type and the right Dropped flag for
+// delivered, drop-rate, partitioned, and crashed sends.
+func TestObserverReportsOutcomes(t *testing.T) {
+	t.Parallel()
+	n, tA, _ := makeNet(7)
+
+	var (
+		mu     sync.Mutex
+		events []simnet.MessageEvent
+	)
+	n.SetObserver(func(ev simnet.MessageEvent) {
+		mu.Lock()
+		events = append(events, ev)
+		mu.Unlock()
+	})
+
+	req := raft.Message{Type: raft.MsgAppendEntries, From: nodeA, To: nodeB, Term: 1}
+
+	// 1) Delivered.
+	if _, err := tA.Send(nodeB, req); err != nil {
+		t.Fatalf("delivered send: unexpected error %v", err)
+	}
+	// 2) Dropped by drop rate.
+	n.SetDrop(1.0)
+	if _, err := tA.Send(nodeB, req); !errors.Is(err, transport.ErrUnreachable) {
+		t.Fatalf("dropped send: want ErrUnreachable, got %v", err)
+	}
+	n.SetDrop(0)
+	// 3) Partitioned.
+	n.Partition([]raft.NodeID{nodeA}, []raft.NodeID{nodeB})
+	_, _ = tA.Send(nodeB, req)
+	n.Heal()
+	// 4) Crashed destination.
+	n.Crash(nodeB)
+	_, _ = tA.Send(nodeB, req)
+	n.Recover(nodeB)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(events) != 4 {
+		t.Fatalf("observer events = %d, want 4: %+v", len(events), events)
+	}
+	wantDropped := []bool{false, true, true, true}
+	for i, ev := range events {
+		if ev.From != nodeA || ev.To != nodeB || ev.Type != raft.MsgAppendEntries {
+			t.Errorf("event %d = %+v, want From=A To=B Type=MsgAppendEntries", i, ev)
+		}
+		if ev.Dropped != wantDropped[i] {
+			t.Errorf("event %d Dropped = %v, want %v", i, ev.Dropped, wantDropped[i])
+		}
+	}
+}
+
+// TestObserverNilSafe verifies that sends work when no observer is set.
+func TestObserverNilSafe(t *testing.T) {
+	t.Parallel()
+	_, tA, _ := makeNet(8)
+	if _, err := tA.Send(nodeB, raft.Message{Type: raft.MsgRequestVote, From: nodeA, To: nodeB}); err != nil {
+		t.Fatalf("send with no observer: %v", err)
+	}
 }
 
 // TestBasicDelivery checks that two registered nodes can exchange messages.
