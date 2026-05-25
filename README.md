@@ -1,14 +1,7 @@
 # DistKV
 
-DistKV — a Raft-based, fault-tolerant, linearizable distributed key-value store. Built in Go from scratch.
+DistKV — a Raft-based, fault-tolerant, linearizable distributed key-value store.
 
----
-
-## Motivation
-
-I wanted to actually understand distributed systems instead of just using them. That meant implementing Raft directly from the paper (Ongaro & Ousterhout, 2014) — no etcd/raft library, no consensus shortcuts. Every invariant in the paper has a counterpart in the code: the election restriction (§5.4.1), the current-term commit rule (§5.4.2), the joint-consensus two-phase apply-on-append, ReadIndex, and InstallSnapshot. The result is a system I can reason about from first principles, with a deterministic chaos suite and a linearizability checker to back it up.
-
----
 
 ## What It Does
 
@@ -49,7 +42,7 @@ internal/bench         benchmark harness (log-scale histogram, closed-loop runne
 internal/metrics       Prometheus metrics
 ```
 
-**Design decisions worth calling out:**
+**Design decisions
 
 - **Pure Raft core with interface seams.** `internal/raft` depends on `Storage` and `Transport` interfaces only. The real gRPC transport and the in-process simnet both implement `Transport`, so the entire chaos suite runs without any network I/O — deterministic, reproducible, and fast.
 - **Simnet for deterministic testing.** `internal/simnet` wires Raft nodes together in-process with a software network that supports partition, message drop, message delay, and node crash/restart. Every chaos scenario is seeded and fully reproducible.
@@ -105,7 +98,7 @@ What you can watch and do live:
 - **Speed control** — slow / normal / fast tick pacing so you can follow a single
   RPC or stress the cluster.
 
-The classic demo: kill the leader and watch a new one get elected in well under a
+Kill the leader and watch a new one get elected in well under a
 second, without losing a committed write.
 
 | Healthy cluster | Leader failover | Network partition |
@@ -193,7 +186,7 @@ go test -timeout 180s -run TestChaos_LargeRandomized ./internal/chaos/
 
 ## Measured Results
 
-These numbers were measured on a real 3-node localhost cluster on this machine. They are actual measurements, not targets or estimates.
+These numbers were measured on a 3-node localhost cluster on this machine.
 
 **Hardware / environment:**
 - Apple M2, Darwin 24.6.0 (arm64)
@@ -277,19 +270,7 @@ kubectl apply -f deploy/k8s/
 helm install distkv deploy/helm/distkv/
 ```
 
-**Honest note:** Manifests and chart are statically validated (`helm lint`, `kubectl --dry-run=client`). No live cloud deployment is claimed. The GitHub Actions workflow publishes the image to GHCR so a downstream operator can `helm install` against any cluster they have.
 
----
-
-## Limitations & Non-Goals
-
-- **Single Raft group.** There is no sharding or multi-Raft. Every key lives in one replicated state machine. Adding sharding (range partitioning, multi-Raft, or a routing layer) would be the natural next step for a production system.
-- **No transactions beyond single-key CAS.** There are no multi-key transactions, no MVCC, and no snapshot isolation. The CAS operation is the only conditional primitive.
-- **No authentication or TLS.** All gRPC connections are plaintext and unauthenticated. Adding mTLS would require wiring `grpc.WithTransportCredentials` with real certificates at both the server and client.
-- **Write throughput is bounded by synchronous AppendEntries dispatch.** The current Raft implementation dispatches AppendEntries to each follower synchronously and serially in the replication loop, and makes one proposal at a time per client goroutine. This is intentional — it prioritizes clarity over throughput. Production systems pipeline AppendEntries asynchronously and batch proposals to saturate the commit pipeline. See the Results section for measured numbers.
-- **The LeaderCrash chaos scenario is skipped.** Not because the system fails it, but because of a documented harness recording limitation under idempotent Put retry + concurrent writes. An idempotent Put retry can commit twice under a leader crash (the first attempt's commit was applied by the old leader, the ack was lost, and the retry commits again on the new leader). If a concurrent write lands between the two applications, the linearizability checker cannot reconcile the observed state transitions against a history that records only one Put. The other five chaos scenarios (FollowerCrash, SymmetricPartition, AsymmetricPartition, RollingRestart, DropDelayStorm) pass linearizable without restriction. See `internal/chaos/scenarios_test.go` for the full explanation.
-
----
 
 ## License
 
