@@ -55,13 +55,24 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	}
 }
 
+// friendlyErr translates internal/context errors into a message that reads
+// clearly in the web UI. A bounded op that runs out of time during a leaderless
+// window surfaces as a deadline error from deep in the stack; the user should
+// see why, not the Go internals.
+func friendlyErr(err error) error {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return errors.New("timed out — cluster could not commit (no stable leader / quorum)")
+	}
+	return err
+}
+
 // propose issues cmd against the current leader, retrying on transient
 // leadership errors until ctx is done. Definitive application errors (CAS
 // mismatch, unknown op) and context errors are returned immediately.
 func (c *Cluster) propose(ctx context.Context, cmd store.Command) (string, error) {
 	for {
 		if ctx.Err() != nil {
-			return "", ctx.Err()
+			return "", friendlyErr(ctx.Err())
 		}
 		rn, ok := c.leaderNode()
 		if !ok {
@@ -80,7 +91,7 @@ func (c *Cluster) propose(ctx context.Context, cmd store.Command) (string, error
 			}
 			continue
 		}
-		return "", err
+		return "", friendlyErr(err)
 	}
 }
 
@@ -105,7 +116,7 @@ func (c *Cluster) CAS(ctx context.Context, key, expect, value string) (string, e
 func (c *Cluster) Get(ctx context.Context, key string) (string, bool, error) {
 	for {
 		if ctx.Err() != nil {
-			return "", false, ctx.Err()
+			return "", false, friendlyErr(ctx.Err())
 		}
 		rn, ok := c.leaderNode()
 		if !ok {
@@ -124,7 +135,7 @@ func (c *Cluster) Get(ctx context.Context, key string) (string, bool, error) {
 			}
 			continue
 		}
-		return "", false, err
+		return "", false, friendlyErr(err)
 	}
 }
 

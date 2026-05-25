@@ -341,15 +341,33 @@ func (c *Cluster) SetDrop(rate float64) {
 	c.net.SetDrop(rate)
 }
 
-// SetSpeed rebuilds every node at a new wall-clock tick interval over the same
-// storage, preserving committed state. Faults (crashes/partitions) are
-// cleared, since the network is rebuilt.
+// SetSpeed changes the wall-clock tick interval by rebuilding each node over
+// its EXISTING storage on the same network. Committed data, the log, and fault
+// state (crashes, partitions, drop rate) are all preserved across the change —
+// only the tick cadence differs. A node is briefly stopped while its successor
+// (carrying the same durable state) is built and started, exactly as a restart.
 func (c *Cluster) SetSpeed(speed Speed) {
-	c.Stop()
 	c.mu.Lock()
 	c.speed = speed
+	ids := make([]raft.NodeID, len(c.ids))
+	copy(ids, c.ids)
 	c.mu.Unlock()
-	c.build()
+
+	for _, id := range ids {
+		c.mu.Lock()
+		nd := c.nodes[id]
+		c.mu.Unlock()
+		if nd == nil {
+			continue
+		}
+		nd.rn.Stop()
+		fresh := c.buildNodeLocked(id, nd.storage)
+		c.mu.Lock()
+		nd.rn = fresh
+		c.mu.Unlock()
+		c.net.Register(id, fresh.Step)
+		fresh.Start()
+	}
 }
 
 // Reset stops the cluster and rebuilds it from scratch with a new seed and

@@ -3,6 +3,7 @@ package websim_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -212,7 +213,34 @@ func TestNoQuorumBlocksWrites(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
-	if _, err := c.Put(ctx, "x", "1"); err == nil {
+	_, err := c.Put(ctx, "x", "1")
+	if err == nil {
 		t.Fatalf("Put should fail with no quorum, got nil error")
+	}
+	// The UI must never see a raw Go internals string.
+	if strings.Contains(err.Error(), "context deadline") || strings.Contains(err.Error(), "context canceled") {
+		t.Fatalf("error should be friendly, got raw: %v", err)
+	}
+}
+
+func TestSetSpeedPreservesData(t *testing.T) {
+	c := newTestCluster(t, 5)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := c.Put(ctx, "k", "v1"); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	c.SetSpeed(websim.SpeedSlow) // rebuilds nodes; must preserve the log
+
+	// SpeedSlow has a 250ms tick, so re-election can take a few seconds.
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel2()
+	v, found, err := c.Get(ctx2, "k")
+	if err != nil {
+		t.Fatalf("Get after SetSpeed: %v", err)
+	}
+	if !found || v != "v1" {
+		t.Fatalf("data lost after SetSpeed: got (%q,%v), want (\"v1\",true)", v, found)
 	}
 }
