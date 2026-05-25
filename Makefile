@@ -1,7 +1,14 @@
-.PHONY: test lint proto build bench docker
+.PHONY: test lint proto build bench docker demo-web
 
 test:
 	go test -race ./...
+
+# demo-web builds and launches the live web showcase: a single binary that runs
+# an in-process Raft cluster and serves a terminal-styled browser console for it.
+demo-web:
+	go build -o bin/distkv-web ./cmd/distkv-web
+	@echo "DistKV web showcase → http://localhost:8080"
+	bin/distkv-web
 
 lint:
 	golangci-lint run

@@ -78,6 +78,43 @@ internal/metrics       Prometheus metrics
 
 ---
 
+## Live Web Showcase
+
+```bash
+make demo-web        # builds bin/distkv-web and serves http://localhost:8080
+```
+
+A single self-contained binary (`cmd/distkv-web`) runs a 5-node cluster
+**in-process** — the real `internal/raft` consensus core over the
+`internal/simnet` software network — and serves a terminal-styled browser
+console that makes the protocol visible and pokeable. No external cluster, no
+dependencies; all assets are `go:embed`ed.
+
+What you can watch and do live:
+
+- **Consensus in motion** — nodes on a ring with role/term, the leader glowing,
+  and animated RPC dots (heartbeats, vote requests, AppendEntries) flying along
+  the edges; a narrated event log ("n3 → Candidate (term 5)", "n1 became Leader").
+- **Fault injection** — kill/restart any node, split the network into partitions,
+  or crank a message-drop slider, and watch elections and recovery happen.
+- **Key-value ops** — `put`/`get`/`del` from the UI; writes replicate and commit
+  across the per-node Raft log columns (committed entries turn green); reads are
+  linearizable via ReadIndex.
+- **Speed control** — slow / normal / fast tick pacing so you can follow a single
+  RPC or stress the cluster.
+
+The classic demo: kill the leader and watch a new one get elected in well under a
+second, without losing a committed write.
+
+> Architecture note: the consensus code running is identical to the production
+> path; only the transport between nodes is the deterministic in-process simnet
+> (the same harness the chaos suite uses), which is what makes the whole thing a
+> single reliable binary.
+
+<!-- TODO: add demo GIF + screenshots here (recorded from `make demo-web`) -->
+
+---
+
 ## Raft Design Notes
 
 ### Leader election
