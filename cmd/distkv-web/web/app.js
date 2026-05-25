@@ -123,31 +123,64 @@ function renderNodeList() {
 }
 
 // ---- fault buttons (crash / recover toggle) ----
+// Built once per node set and updated in place. Rebuilding the row on every
+// 100ms state frame would tear the button out from under an in-progress click
+// and the click would be lost (you'd have to spam it).
+const faultBtnEls = {}; // id -> button
 function renderFaultBtns() {
-  faultBtns.innerHTML = "";
+  const ids = state.nodes.map((n) => n.id);
+  if (!sameIds(faultBtnEls, ids)) {
+    faultBtns.innerHTML = "";
+    for (const k of Object.keys(faultBtnEls)) delete faultBtnEls[k];
+    for (const id of ids) {
+      const b = document.createElement("button");
+      b.onclick = () => {
+        const node = state.nodes.find((n) => n.id === id);
+        cmd(node && node.up ? "crash" : "recover", { id });
+      };
+      faultBtnEls[id] = b;
+      faultBtns.appendChild(b);
+    }
+  }
   for (const n of state.nodes) {
-    const b = document.createElement("button");
+    const b = faultBtnEls[n.id];
+    if (!b) continue;
     b.textContent = n.up ? `kill ${n.id}` : `wake ${n.id}`;
-    if (!n.up) b.style.borderColor = "#4a2b2b";
-    b.onclick = () => cmd(n.up ? "crash" : "recover", { id: n.id });
-    faultBtns.appendChild(b);
+    b.style.borderColor = n.up ? "" : "#4a2b2b";
   }
 }
 
 // ---- partition builder (toggle nodes into side B) ----
 const sideB = new Set();
+const chipEls = {}; // id -> chip span
 function renderPartBuilder() {
-  partBuilder.innerHTML = "";
-  for (const n of state.nodes) {
-    const chip = document.createElement("span");
-    chip.className = "chip " + (sideB.has(n.id) ? "gB" : "gA");
-    chip.textContent = n.id;
-    chip.onclick = () => {
-      if (sideB.has(n.id)) sideB.delete(n.id); else sideB.add(n.id);
-      renderPartBuilder();
-    };
-    partBuilder.appendChild(chip);
+  const ids = state.nodes.map((n) => n.id);
+  if (!sameIds(chipEls, ids)) {
+    partBuilder.innerHTML = "";
+    for (const k of Object.keys(chipEls)) delete chipEls[k];
+    for (const id of ids) {
+      const chip = document.createElement("span");
+      chip.textContent = id;
+      chip.onclick = () => {
+        if (sideB.has(id)) sideB.delete(id); else sideB.add(id);
+        updateChipClasses();
+      };
+      chipEls[id] = chip;
+      partBuilder.appendChild(chip);
+    }
   }
+  updateChipClasses();
+}
+function updateChipClasses() {
+  for (const id of Object.keys(chipEls)) {
+    chipEls[id].className = "chip " + (sideB.has(id) ? "gB" : "gA");
+  }
+}
+
+// sameIds reports whether the keys of an element map already match ids exactly.
+function sameIds(map, ids) {
+  const keys = Object.keys(map);
+  return keys.length === ids.length && ids.every((id) => map[id]);
 }
 $("#partApply").onclick = () => {
   const a = state.nodes.map((n) => n.id).filter((id) => !sideB.has(id));
