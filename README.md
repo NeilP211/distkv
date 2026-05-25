@@ -80,6 +80,8 @@ internal/metrics       Prometheus metrics
 
 ## Live Web Showcase
 
+![DistKV live Raft console — leader election and log replication](docs/assets/web-showcase/demo.gif)
+
 ```bash
 make demo-web        # builds bin/distkv-web and serves http://localhost:8080
 ```
@@ -106,12 +108,15 @@ What you can watch and do live:
 The classic demo: kill the leader and watch a new one get elected in well under a
 second, without losing a committed write.
 
+| Healthy cluster | Leader failover | Network partition |
+| :---: | :---: | :---: |
+| ![Healthy 5-node cluster: n2 leads, keys replicated and committed across every log](docs/assets/web-showcase/hero.png) | ![Leader n2 killed (greyed ✕); n5 elected the new leader, no data lost](docs/assets/web-showcase/failover.png) | ![Network partition: the majority {n3,n4,n5} keeps leader n5 while the isolated minority {n1,n2} campaigns in vain — its term climbs to 11 vs the majority's 3](docs/assets/web-showcase/partition.png) |
+| Leader glowing, heartbeats in flight, writes committed (green) on all nodes | Kill the leader → a new one is elected in well under a second | Split-brain prevented: only the quorum side makes progress |
+
 > Architecture note: the consensus code running is identical to the production
 > path; only the transport between nodes is the deterministic in-process simnet
 > (the same harness the chaos suite uses), which is what makes the whole thing a
 > single reliable binary.
-
-<!-- TODO: add demo GIF + screenshots here (recorded from `make demo-web`) -->
 
 ---
 
