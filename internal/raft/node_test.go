@@ -86,6 +86,28 @@ func TestBecomeFollower(t *testing.T) {
 	}
 }
 
+func TestLastIndexAccessor(t *testing.T) {
+	// A fresh node over empty storage has LastIndex 0.
+	n := newTestNode(t, "n1", []NodeID{"n1", "n2", "n3"})
+	if li := n.LastIndex(); li != 0 {
+		t.Fatalf("LastIndex on empty log = %d, want 0", li)
+	}
+
+	// A node constructed over storage with three entries reports the last
+	// entry's index.
+	s := NewMemStorage()
+	if err := s.AppendEntries([]LogEntry{ent(1, 1), ent(1, 2), ent(1, 3)}); err != nil {
+		t.Fatalf("AppendEntries: %v", err)
+	}
+	n2, err := NewNode(testConfig("n1", []NodeID{"n1", "n2", "n3"}, s))
+	if err != nil {
+		t.Fatalf("NewNode: %v", err)
+	}
+	if li := n2.LastIndex(); li != 3 {
+		t.Fatalf("LastIndex = %d, want 3", li)
+	}
+}
+
 func TestBecomeLeaderInitializesIndices(t *testing.T) {
 	s := NewMemStorage()
 	if err := s.AppendEntries([]LogEntry{ent(1, 1), ent(1, 2), ent(1, 3)}); err != nil {

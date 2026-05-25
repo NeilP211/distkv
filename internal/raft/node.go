@@ -393,6 +393,14 @@ func (n *Node) CommitIndex() uint64 {
 	return n.commitIndex
 }
 
+// LastIndex returns the index of the last entry in the log (0 if the log is
+// empty). Read-only; safe for concurrent use.
+func (n *Node) LastIndex() uint64 {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.log.lastIndex()
+}
+
 // ID returns the node's stable identifier.
 func (n *Node) ID() NodeID {
 	return n.id
